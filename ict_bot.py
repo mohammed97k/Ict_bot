@@ -373,6 +373,7 @@ def main():
             process_symbol(name, cfg, state, now_utc)
         except Exception as e:
             print(f"[{name}] خطأ غير متوقع: {e}")
+    send_telegram("✅ تم تشغيل البوت بنجاح والاتصال بتليجرام يعمل بشكل سليم!")
 
     save_state(state)
 
