@@ -3,6 +3,7 @@ import math
 import os
 import time
 from datetime import datetime, timezone
+import zoneinfo
 import pandas as pd
 import requests
 
@@ -13,6 +14,9 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "f66d01dd648c41898a1d908f17fff5a0")
 STATE_FILE = "state.json"
+
+# المنطقة الزمنية للموصل / العراق
+MOSUL_TZ = zoneinfo.ZoneInfo("Asia/Baghdad")
 
 # ملف تعريف الأصول: الذهب واليورو حصراً
 PROFILES = {
@@ -139,8 +143,8 @@ def calc_atr(df: pd.DataFrame, period: int = 14):
 # =====================================================
 # محرك الاستراتيجية
 # =====================================================
-def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
-    today_str = now_utc.strftime("%Y-%m-%d")
+def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime):
+    today_str = now_local.strftime("%Y-%m-%d")
     sym_state = state.get(
         symbol_name, {"active_trade": None, "trades_today": 0, "last_date": today_str}
     )
@@ -155,7 +159,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
 
     # جلب بيانات فريم الساعة (1h)
     df_h1 = fetch_twelve_data(sym, "1h", 120)
-    time.sleep(8)  # احترام حد الـ Rate Limit
+    time.sleep(8)
 
     # جلب بيانات فريم اليومي (1day)
     df_d = fetch_twelve_data(sym, "1day", 80)
@@ -198,6 +202,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
             outcome = "🎯 ضرب الهدف (TP)" if hit_tp else "🛑 ضرب الستوب (SL)"
             exit_price = tp if hit_tp else sl
             move_pts = abs(exit_price - entry) * mult
+            exit_time_str = now_local.strftime("%I:%M %p")
 
             exit_msg = (
                 f"<b>🚨 إغلاق صفقة — {symbol_name}</b>\n"
@@ -208,7 +213,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
                 f"<b>النقاط:</b> {move_pts:.1f} نقطة\n"
                 f"<b>R:R:</b> 1:{rr:.2f}\n"
                 f"<b>وقت الدخول:</b> {entry_time}\n"
-                f"<b>وقت الخروج:</b> {now_utc.strftime('%Y-%m-%d %H:%M')} UTC"
+                f"<b>وقت الخروج:</b> {exit_time_str} (توقيت الموصل)"
             )
             send_telegram(exit_msg)
             sym_state["active_trade"] = None
@@ -347,7 +352,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         tp_final = bull_entry + tp_dist
         rr = tp_dist / sl_dist
 
-        entry_time_str = now_utc.strftime("%Y-%m-%d %H:%M")
+        entry_time_str = now_local.strftime("%I:%M %p")
         msg = (
             f"<b>🟢 إشارة دخول جديدة — {symbol_name}</b>\n"
             f"<b>الاتجاه:</b> شراء (BUY)\n"
@@ -355,7 +360,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
             f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
             f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
             f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
-            f"<b>التوقيت (UTC):</b> {entry_time_str}\n"
+            f"<b>وقت الدخول:</b> {entry_time_str} (توقيت الموصل)\n"
             f"⚠️ إدارة رأس المال أولاً!"
         )
         send_telegram(msg)
@@ -386,7 +391,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         tp_final = bear_entry - tp_dist
         rr = tp_dist / sl_dist
 
-        entry_time_str = now_utc.strftime("%Y-%m-%d %H:%M")
+        entry_time_str = now_local.strftime("%I:%M %p")
         msg = (
             f"<b>🔴 إشارة دخول جديدة — {symbol_name}</b>\n"
             f"<b>الاتجاه:</b> بيع (SELL)\n"
@@ -394,7 +399,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
             f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
             f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
             f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
-            f"<b>التوقيت (UTC):</b> {entry_time_str}\n"
+            f"<b>التوقيت:</b> {entry_time_str} (توقيت الموصل)\n"
             f"⚠️ إدارة رأس المال أولاً!"
         )
         send_telegram(msg)
@@ -416,18 +421,20 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
 # نقطة التشغيل الرئيسية
 # =====================================================
 def main():
+    # تحويل التوقيت إلى توقيت الموصل / بغداد
     now_utc = datetime.now(timezone.utc)
-    time_str = now_utc.strftime("%Y-%m-%d %H:%M")
+    now_local = now_utc.astimezone(MOSUL_TZ)
+    time_str = now_local.strftime("%I:%M %p")
 
-    # إرسال رسالة اختبار للتأكد من اتصال البوت
-    send_telegram(f"🤖 <b>فحص ICT شغال بنجاح!</b>\n⏰ التوقيت: {time_str} UTC\n🔍 جاري فحص: الذهب (XAUUSD) واليورو (EURUSD)...")
+    # إشعار الفحص بتوقيت الموصل ونظام 12 ساعة
+    send_telegram(f"🤖 <b>فحص ICT شغال بنجاح!</b>\n⏰ الوقت: {time_str} (توقيت الموصل)\n🔍 جاري فحص: الذهب (XAUUSD) واليورو (EURUSD)...")
 
     state = load_state()
 
     for name, cfg in PROFILES.items():
         try:
             print(f"جاري فحص {name}...")
-            process_symbol(name, cfg, state, now_utc)
+            process_symbol(name, cfg, state, now_local)
         except Exception as e:
             print(f"[{name}] خطأ أثناء المعالجة: {e}")
 
