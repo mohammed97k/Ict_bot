@@ -1,1 +1,12 @@
-{}
+{
+    "XAUUSD": {
+        "active_trade": null,
+        "trades_today": 0,
+        "last_date": "2026-09-15"
+    },
+    "EURUSD": {
+        "active_trade": null,
+        "trades_today": 0,
+        "last_date": "2026-09-15"
+    }
+}
