@@ -14,7 +14,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "f66d01dd648c41898a1d908f17fff5a0")
 STATE_FILE = "state.json"
 
-# ملف تعريف الأصول والرموز الخاصة بـ Twelve Data
+# ملف تعريف الأصول: الذهب واليورو حصراً
 PROFILES = {
     "XAUUSD": {
         "symbol": "XAU/USD",
@@ -35,26 +35,6 @@ PROFILES = {
         "max_sl": 0.0035,
         "min_tp": 0.0030,
         "max_tp": 0.0070,
-    },
-    "US30": {
-        "symbol": "DJI",
-        "profile": "US30",
-        "digits": 1,
-        "point_mult": 1.0,
-        "min_sl": 60.0,
-        "max_sl": 150.0,
-        "min_tp": 150.0,
-        "max_tp": 350.0,
-    },
-    "NAS100": {
-        "symbol": "IXIC",
-        "profile": "NAS100",
-        "digits": 2,
-        "point_mult": 1.0,
-        "min_sl": 60.0,
-        "max_sl": 150.0,
-        "min_tp": 150.0,
-        "max_tp": 350.0,
     },
 }
 
@@ -437,6 +417,11 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
 # =====================================================
 def main():
     now_utc = datetime.now(timezone.utc)
+    time_str = now_utc.strftime("%Y-%m-%d %H:%M")
+
+    # إرسال رسالة اختبار للتأكد من اتصال البوت
+    send_telegram(f"🤖 <b>فحص ICT شغال بنجاح!</b>\n⏰ التوقيت: {time_str} UTC\n🔍 جاري فحص: الذهب (XAUUSD) واليورو (EURUSD)...")
+
     state = load_state()
 
     for name, cfg in PROFILES.items():
