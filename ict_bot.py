@@ -1,53 +1,100 @@
-import os
 import json
 import math
+import os
 from datetime import datetime, timezone
-
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import requests
+import yfinance as yf
 
-# =========================================================
-# إعدادات عامة
-# =========================================================
-
-SYMBOLS = {
-    "EURUSD": {"ticker": "EURUSD=X", "digits": 5, "pip": 0.0001},
-    "XAUUSD": {"ticker": "GC=F",     "digits": 2, "pip": 0.1},
-    "NASDAQ": {"ticker": "NQ=F",     "digits": 1, "pip": 1.0},
-    "DOWJONES": {"ticker": "YM=F",   "digits": 1, "pip": 1.0},
-}
-
-MIN_RR = 2.0                # أقل نسبة عائد/مخاطرة مقبولة (من اختيارك)
-SWING_WINDOW = 3            # عدد الشموع يمين ويسار لتأكيد القمة/القاع (Fractal)
-DISPLACEMENT_MULT = 1.4     # حجم شمعة الإزاحة يجب يكون أكبر من متوسط آخر 20 شمعة بهذا المعامل
-LOOKBACK_SWEEP = 15         # كم شمعة نرجع نبحث عن اصطياد سيولة حديث
-LOOKAHEAD_MSS = 12          # كم شمعة بعد الاصطياد نسمح فيها لظهور MSS
+# =====================================================
+# الإعدادات وقنوات التليجرام
+# =====================================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 STATE_FILE = "state.json"
 
-KILLZONES_GMT = [
-    (7, 10),   # لندن
-    (12, 15),  # نيويورك
-]
+# ملف تعريف الأصول والحدود المطابقة لكود Pine Script
+PROFILES = {
+    "XAUUSD": {
+        "ticker": "GC=F",
+        "profile": "GOLD",
+        "digits": 2,
+        "point_mult": 10.0,
+        "min_sl": 1.0,
+        "max_sl": 15.0,
+        "min_tp": 15.0,
+        "max_tp": 30.0,
+    },
+    "US30": {
+        "ticker": "YM=F",
+        "profile": "US30",
+        "digits": 1,
+        "point_mult": 1.0,
+        "min_sl": 60.0,
+        "max_sl": 150.0,
+        "min_tp": 150.0,
+        "max_tp": 350.0,
+    },
+    "NAS100": {
+        "ticker": "NQ=F",
+        "profile": "NAS100",
+        "digits": 2,
+        "point_mult": 1.0,
+        "min_sl": 60.0,
+        "max_sl": 150.0,
+        "min_tp": 150.0,
+        "max_tp": 350.0,
+    },
+    "EURUSD": {
+        "ticker": "EURUSD=X",
+        "profile": "FOREX",
+        "digits": 5,
+        "point_mult": 10000.0,
+        "min_sl": 0.0015,
+        "max_sl": 0.0035,
+        "min_tp": 0.0030,
+        "max_tp": 0.0070,
+    },
+}
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+MAX_TRADES_PER_DAY = 3
+HTF_EMA_LEN = 50
+SWING_LEN = 5
+FVG_MIN_ATR_PCT = 0.15
+DISP_MULT = 1.5
+ZONE_MAX_AGE = 30
 
 
-# =========================================================
-# أدوات مساعدة عامة
-# =========================================================
+# =====================================================
+# دالة إرسال التيليجرام
+# =====================================================
+def send_telegram(msg: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram tokens are missing!")
+        print(msg)
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg,
+        "parse_mode": "HTML",
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=15)
+        if not r.ok:
+            print(f"Telegram error: {r.text}")
+    except Exception as e:
+        print(f"Failed to send telegram message: {e}")
 
-def in_killzone(now_utc: datetime) -> bool:
-    h = now_utc.hour
-    return any(start <= h < end for start, end in KILLZONES_GMT)
 
-
+# =====================================================
+# إدارة الحالات (State Management)
+# =====================================================
 def load_state():
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE, "r") as f:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
@@ -55,324 +102,373 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=4, ensure_ascii=False)
 
 
-def send_telegram(text: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram token/chat id missing — skipping send.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-    }
-    try:
-        r = requests.post(url, data=payload, timeout=15)
-        if r.status_code != 200:
-            print("Telegram error:", r.text)
-    except Exception as e:
-        print("Telegram send failed:", e)
+# =====================================================
+# المؤشرات الفنية المساعدة
+# =====================================================
+def calc_atr(df: pd.DataFrame, period: int = 14):
+    high = df["High"]
+    low = df["Low"]
+    close = df["Close"].shift(1)
+    tr1 = high - low
+    tr2 = (high - close).abs()
+    tr3 = (low - close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
 
-# =========================================================
-# جلب البيانات
-# =========================================================
+# =====================================================
+# معالجة الرمز الواحد (ICT Engine)
+# =====================================================
+def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
+    today_str = now_utc.strftime("%Y-%m-%d")
+    sym_state = state.get(
+        symbol_name, {"active_trade": None, "trades_today": 0, "last_date": today_str}
+    )
 
-def fetch(ticker: str, interval: str, period: str) -> pd.DataFrame:
-    df = yf.download(ticker, interval=interval, period=period,
-                      progress=False, auto_adjust=False)
-    if df.empty:
-        return df
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    df = df.rename(columns=str.lower)
-    df.index = pd.to_datetime(df.index, utc=True)
-    return df[["open", "high", "low", "close"]].dropna()
+    # تصفير عدد الصفقات اليومية مع بداية كل يوم جديد
+    if sym_state.get("last_date") != today_str:
+        sym_state["trades_today"] = 0
+        sym_state["last_date"] = today_str
 
-
-# =========================================================
-# اكتشاف القمم والقواع (Swing Points) — أساس البنية والسيولة
-# =========================================================
-
-def find_swings(df: pd.DataFrame, window: int = SWING_WINDOW):
-    highs, lows = [], []
-    h = df["high"].values
-    l = df["low"].values
-    n = len(df)
-    for i in range(window, n - window):
-        if h[i] == max(h[i - window:i + window + 1]):
-            highs.append(i)
-        if l[i] == min(l[i - window:i + window + 1]):
-            lows.append(i)
-    return highs, lows
-
-
-# =========================================================
-# تحديد الانحياز العام (Bias) من الفريم الأعلى
-# آخر MSS مؤكد = كسر بإغلاق لآخر قمة/قاع بنيوي بارز
-# =========================================================
-
-def detect_bias(df_htf: pd.DataFrame):
-    highs, lows = find_swings(df_htf, window=SWING_WINDOW)
-    if not highs or not lows:
-        return None
-
-    closes = df_htf["close"].values
-    n = len(df_htf)
-    last_bias = None
-
-    swing_points = sorted([(i, "H") for i in highs] + [(i, "L") for i in lows])
-
-    for idx in range(SWING_WINDOW * 2, n):
-        recent_highs = [i for i, t in swing_points if t == "H" and i < idx]
-        recent_lows = [i for i, t in swing_points if t == "L" and i < idx]
-        if not recent_highs or not recent_lows:
-            continue
-        last_high_idx = recent_highs[-1]
-        last_low_idx = recent_lows[-1]
-
-        if closes[idx] > df_htf["high"].values[last_high_idx]:
-            last_bias = "up"
-        elif closes[idx] < df_htf["low"].values[last_low_idx]:
-            last_bias = "down"
-
-    return last_bias
-
-
-def find_dol(df_htf: pd.DataFrame, bias: str, current_price: float):
-    highs, lows = find_swings(df_htf, window=SWING_WINDOW)
-    if bias == "up":
-        candidates = [df_htf["high"].values[i] for i in highs
-                      if df_htf["high"].values[i] > current_price]
-        return min(candidates) if candidates else None
-    elif bias == "down":
-        candidates = [df_htf["low"].values[i] for i in lows
-                      if df_htf["low"].values[i] < current_price]
-        return max(candidates) if candidates else None
-    return None
-
-
-# =========================================================
-# اصطياد السيولة + تأكيد MSS + الإزاحة على الفريم الأدنى (15 دقيقة)
-# =========================================================
-
-def detect_setup(df_ltf: pd.DataFrame, bias: str):
-    """
-    يفصل بين أمرين مختلفين عمداً:
-    - "المستوى البنيوي" الذي قد يكون قديماً نسبياً (آخر قاع/قمة بارزة معروفة).
-    - "شمعة الاصطياد" اللي لازم تكون حديثة (ضمن آخر LOOKBACK_SWEEP شمعة).
-    """
-    highs, lows = find_swings(df_ltf, window=SWING_WINDOW)
-    n = len(df_ltf)
-    if n < 30:
-        return None
-
-    high = df_ltf["high"].values
-    low = df_ltf["low"].values
-    close = df_ltf["close"].values
-    open_ = df_ltf["open"].values
-    body = np.abs(close - open_)
-    avg_body = pd.Series(body).rolling(20).mean().values
-
-    recent_start = max(0, n - LOOKBACK_SWEEP)
-
-    if bias == "up":
-        low_levels = [(i, low[i]) for i in lows]
-        for j in range(recent_start, n):
-            prior = [lvl for i, lvl in low_levels if i < j]
-            if not prior:
-                continue
-            level = prior[-1]
-            if low[j] < level and close[j] > level:
-                sweep_candle = j
-                prior_highs = [i for i in highs if i < sweep_candle]
-                if not prior_highs:
-                    continue
-                structure_level = high[prior_highs[-1]]
-                for k in range(sweep_candle, min(sweep_candle + LOOKAHEAD_MSS, n)):
-                    if close[k] > structure_level and not math.isnan(avg_body[k]) \
-                            and body[k] > DISPLACEMENT_MULT * avg_body[k]:
-                        return build_setup(df_ltf, "up", sweep_candle, k, highs, lows)
-    else:
-        high_levels = [(i, high[i]) for i in highs]
-        for j in range(recent_start, n):
-            prior = [lvl for i, lvl in high_levels if i < j]
-            if not prior:
-                continue
-            level = prior[-1]
-            if high[j] > level and close[j] < level:
-                sweep_candle = j
-                prior_lows = [i for i in lows if i < sweep_candle]
-                if not prior_lows:
-                    continue
-                structure_level = low[prior_lows[-1]]
-                for k in range(sweep_candle, min(sweep_candle + LOOKAHEAD_MSS, n)):
-                    if close[k] < structure_level and not math.isnan(avg_body[k]) \
-                            and body[k] > DISPLACEMENT_MULT * avg_body[k]:
-                        return build_setup(df_ltf, "down", sweep_candle, k, highs, lows)
-    return None
-
-
-def build_setup(df_ltf, direction, sweep_idx, mss_idx, highs, lows):
-    high = df_ltf["high"].values
-    low = df_ltf["low"].values
-    open_ = df_ltf["open"].values
-    close = df_ltf["close"].values
-    n = len(df_ltf)
-
-    end_search = min(mss_idx + 10, n - 1)
-    if direction == "up":
-        disp_low = low[sweep_idx]
-        disp_high = max(high[mss_idx:end_search + 1])
-    else:
-        disp_high = high[sweep_idx]
-        disp_low = min(low[mss_idx:end_search + 1])
-
-    rng = disp_high - disp_low
-    if rng <= 0:
-        return None
-
-    if direction == "up":
-        ote_top = disp_high - rng * 0.62
-        ote_bottom = disp_high - rng * 0.79
-    else:
-        ote_bottom = disp_low + rng * 0.62
-        ote_top = disp_low + rng * 0.79
-
-    ob_zone = None
-    for i in range(mss_idx, sweep_idx, -1):
-        is_bear = close[i] < open_[i]
-        is_bull = close[i] > open_[i]
-        if direction == "up" and is_bear:
-            ob_zone = (low[i], high[i])
-            break
-        if direction == "down" and is_bull:
-            ob_zone = (low[i], high[i])
-            break
-
-    fvg_zone = None
-    for i in range(sweep_idx + 1, min(mss_idx + 3, n - 1)):
-        if direction == "up" and high[i - 1] < low[i + 1]:
-            fvg_zone = (high[i - 1], low[i + 1])
-        elif direction == "down" and low[i - 1] > high[i + 1]:
-            fvg_zone = (high[i + 1], low[i - 1])
-
-    return {
-        "direction": direction,
-        "sweep_idx": sweep_idx,
-        "mss_idx": mss_idx,
-        "sweep_level": low[sweep_idx] if direction == "up" else high[sweep_idx],
-        "ote_zone": (ote_bottom, ote_top),
-        "ob_zone": ob_zone,
-        "fvg_zone": fvg_zone,
-        "sweep_time": df_ltf.index[sweep_idx],
-    }
-
-
-def price_in_zone(price, zone, tolerance=0.0):
-    if zone is None:
-        return False
-    lo, hi = min(zone), max(zone)
-    return (lo - tolerance) <= price <= (hi + tolerance)
-
-
-# =========================================================
-# المعالجة الكاملة لزوج واحد
-# =========================================================
-
-def process_symbol(name: str, cfg: dict, state: dict, now_utc: datetime):
     ticker = cfg["ticker"]
     digits = cfg["digits"]
+    mult = cfg["point_mult"]
 
-    df_htf = fetch(ticker, interval="60m", period="30d")
-    df_ltf = fetch(ticker, interval="15m", period="10d")
+    # جلب بيانات الساعة (H1) واليومي (D)
+    df_h1 = yf.download(ticker, period="30d", interval="1h", progress=False)
+    df_d = yf.download(ticker, period="100d", interval="1d", progress=False)
 
-    if df_htf.empty or df_ltf.empty or len(df_ltf) < 40:
-        print(f"[{name}] بيانات غير كافية — تخطي.")
+    if df_h1.empty or df_d.empty or len(df_h1) < 60 or len(df_d) < HTF_EMA_LEN:
+        print(f"[{symbol_name}] البيانات غير كافية.")
         return
 
-    current_price = float(df_ltf["close"].iloc[-1])
+    # تسطيح الأعمدة إذا لزم الأمر في التحديثات الجديدة لـ yfinance
+    if isinstance(df_h1.columns, pd.MultiIndex):
+        df_h1.columns = [c[0] for c in df_h1.columns]
+    if isinstance(df_d.columns, pd.MultiIndex):
+        df_d.columns = [c[0] for c in df_d.columns]
 
-    bias = detect_bias(df_htf)
-    if bias is None:
-        print(f"[{name}] لا يوجد تحيز واضح — لا تداول.")
+    # حساب اليوم السابق والـ HTF Bias
+    df_d["EMA50"] = df_d["Close"].ewm(span=HTF_EMA_LEN, adjust=False).mean()
+    last_d_close = df_d["Close"].iloc[-1]
+    last_d_ema = df_d["EMA50"].iloc[-1]
+    pd_high = df_d["High"].iloc[-2]
+    pd_low = df_d["Low"].iloc[-2]
+
+    htf_bias_up = last_d_close > last_d_ema
+    htf_bias_down = last_d_close < last_d_ema
+
+    # حساب ATR
+    df_h1["ATR14"] = calc_atr(df_h1, 14)
+
+    # =====================================================
+    # 1. متابعة الصفقات النشطة أولاً (إشعار الهدف أو الستوب)
+    # =====================================================
+    active_trade = sym_state.get("active_trade")
+    if active_trade is not None:
+        latest_candle = df_h1.iloc[-1]
+        c_high = float(latest_candle["High"])
+        c_low = float(latest_candle["Low"])
+
+        side = active_trade["side"]
+        entry = active_trade["entry"]
+        sl = active_trade["sl"]
+        tp = active_trade["tp"]
+        rr = active_trade["rr"]
+        entry_time = active_trade["entry_time"]
+
+        hit_tp = False
+        hit_sl = False
+
+        if side == "buy":
+            hit_tp = c_high >= tp
+            hit_sl = c_low <= sl
+        elif side == "sell":
+            hit_tp = c_low <= tp
+            hit_sl = c_high >= sl
+
+        if hit_tp or hit_sl:
+            outcome = "🎯 ضرب الهدف (TP)" if hit_tp else "🛑 ضرب الستوب (SL)"
+            exit_price = tp if hit_tp else sl
+            move_pts = abs(exit_price - entry) * mult
+
+            exit_msg = (
+                f"<b>🚨 إغلاق صفقة — {symbol_name}</b>\n"
+                f"<b>النتيجة:</b> {outcome}\n"
+                f"<b>النوع:</b> {side.upper()}\n"
+                f"<b>سعر الدخول:</b> {entry:.{digits}f}\n"
+                f"<b>سعر الخروج:</b> {exit_price:.{digits}f}\n"
+                f"<b>النقاط:</b> {move_pts:.1f} نقطة\n"
+                f"<b>R:R:</b> 1:{rr:.2f}\n"
+                f"<b>وقت الدخول:</b> {entry_time}\n"
+                f"<b>وقت الخروج:</b> {now_utc.strftime('%Y-%m-%d %H:%M')} UTC"
+            )
+            send_telegram(exit_msg)
+            sym_state["active_trade"] = None
+            state[symbol_name] = sym_state
+            return
+
+    # =====================================================
+    # 2. فحص إمكانية فتح صفقة جديدة
+    # =====================================================
+    if (
+        sym_state.get("active_trade") is not None
+        or sym_state.get("trades_today", 0) >= MAX_TRADES_PER_DAY
+    ):
+        state[symbol_name] = sym_state
         return
 
-    dol = find_dol(df_htf, bias, current_price)
-    if dol is None:
-        print(f"[{name}] لا توجد نقطة سحب سيولة واضحة — لا تداول.")
-        return
+    # محاكاة بنية السوق والمناطق (FVG, OB, Breaker)
+    n = len(df_h1)
+    last_swing_high = None
+    prev_swing_high = None
+    last_swing_low = None
+    prev_swing_low = None
+    structure_trend = 0
 
-    setup = detect_setup(df_ltf, bias)
-    if setup is None:
-        print(f"[{name}] لا يوجد إعداد اصطياد + MSS حالياً — لا تداول.")
-        return
+    bull_fvg = None
+    bear_fvg = None
+    bull_ob = None
+    bear_ob = None
+    bull_breaker = None
+    bear_breaker = None
 
-    in_ote = price_in_zone(current_price, setup["ote_zone"])
-    in_ob = price_in_zone(current_price, setup["ob_zone"])
-    in_fvg = price_in_zone(current_price, setup["fvg_zone"])
+    for i in range(SWING_LEN * 2, n):
+        # الكشف عن القمم والقيعان المحورية (Pivot High / Low)
+        window_high = df_h1["High"].iloc[i - SWING_LEN * 2 : i + 1]
+        mid_idx = i - SWING_LEN
+        if df_h1["High"].iloc[mid_idx] == window_high.max():
+            prev_swing_high = last_swing_high
+            last_swing_high = float(df_h1["High"].iloc[mid_idx])
 
-    if not (in_ote and (in_ob or in_fvg)):
-        print(f"[{name}] السعر ما زال خارج منطقة التراكب (OTE + OB/FVG) — انتظار.")
-        return
+        window_low = df_h1["Low"].iloc[i - SWING_LEN * 2 : i + 1]
+        if df_h1["Low"].iloc[mid_idx] == window_low.min():
+            prev_swing_low = last_swing_low
+            last_swing_low = float(df_h1["Low"].iloc[mid_idx])
 
-    entry = current_price
-    buffer = cfg["pip"] * 3
+        c_close = df_h1["Close"].iloc[i]
+        c_open = df_h1["Open"].iloc[i]
+        c_high = df_h1["High"].iloc[i]
+        c_low = df_h1["Low"].iloc[i]
+        c_atr = df_h1["ATR14"].iloc[i]
 
-    if bias == "up":
-        sl = setup["sweep_level"] - buffer
-        tp = dol
-        rr = (tp - entry) / (entry - sl) if (entry - sl) > 0 else 0
-    else:
-        sl = setup["sweep_level"] + buffer
-        tp = dol
-        rr = (entry - tp) / (sl - entry) if (sl - entry) > 0 else 0
+        p_close = df_h1["Close"].iloc[i - 1]
+        p_open = df_h1["Open"].iloc[i - 1]
+        p_high = df_h1["High"].iloc[i - 1]
+        p_low = df_h1["Low"].iloc[i - 1]
 
-    if rr < MIN_RR:
-        print(f"[{name}] نسبة العائد/المخاطرة {rr:.2f} أقل من الحد الأدنى — رفض.")
-        return
+        # كسر بنية السوق (MSS)
+        if (
+            last_swing_high is not None
+            and c_close > last_swing_high
+            and structure_trend <= 0
+        ):
+            structure_trend = 1
+        elif (
+            last_swing_low is not None
+            and c_close < last_swing_low
+            and structure_trend >= 0
+        ):
+            structure_trend = -1
 
-    if not in_killzone(now_utc):
-        print(f"[{name}] إعداد صالح لكن خارج نافذة Killzone — لا إشعار الآن.")
-        return
+        # فحص الفجوات السعرية (FVG)
+        if i >= 2 and not math.isnan(c_atr):
+            low_now = c_low
+            high_2 = df_h1["High"].iloc[i - 2]
+            high_now = c_high
+            low_2 = df_h1["Low"].iloc[i - 2]
 
-    signal_key = f"{name}_{setup['direction']}_{setup['sweep_time'].isoformat()}"
-    if state.get(signal_key):
-        print(f"[{name}] هذا الإعداد أُرسل مسبقاً — تجاهل التكرار.")
-        return
+            if low_now > high_2 and (low_now - high_2) > (c_atr * FVG_MIN_ATR_PCT):
+                bull_fvg = {"top": low_now, "bot": high_2, "bar": i}
+            if high_now < low_2 and (low_2 - high_now) > (c_atr * FVG_MIN_ATR_PCT):
+                bear_fvg = {"top": low_2, "bot": high_now, "bar": i}
 
-    direction_ar = "شراء (BUY)" if bias == "up" else "بيع (SELL)"
-    msg = (
-        f"<b>إشارة ICT — {name}</b>\n"
-        f"الاتجاه: {direction_ar}\n"
-        f"الدخول: {entry:.{digits}f}\n"
-        f"الستوب: {sl:.{digits}f}\n"
-        f"الهدف: {tp:.{digits}f}\n"
-        f"نسبة العائد/المخاطرة: 1:{rr:.2f}\n"
-        f"الوقت (GMT): {now_utc.strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"⚠️ هذه إشارة تحليلية آلية وليست توصية مالية. طبّقها يدوياً بعد المراجعة، وابدأ دائماً بحساب ديمو."
-    )
-    send_telegram(msg)
-    state[signal_key] = True
-    print(f"[{name}] تم إرسال إشعار: {direction_ar} | RR=1:{rr:.2f}")
+        # فحص كتل الأوامر (Order Blocks)
+        candle_range = c_high - c_low
+        is_disp = not math.isnan(c_atr) and candle_range > (c_atr * DISP_MULT)
+
+        if is_disp and c_close > c_open and p_close < p_open:
+            bull_ob = {"top": p_high, "bot": p_low, "bar": i}
+        if is_disp and c_close < c_open and p_close > p_open:
+            bear_ob = {"top": p_high, "bot": p_low, "bar": i}
+
+        # تحول OB إلى Breaker Block
+        if bull_ob is not None and c_close < bull_ob["bot"]:
+            bear_breaker = {"top": bull_ob["top"], "bot": bull_ob["bot"], "bar": i}
+            bull_ob = None
+
+        if bear_ob is not None and c_close > bear_ob["top"]:
+            bull_breaker = {"top": bear_ob["top"], "bot": bear_ob["bot"], "bar": i}
+            bear_ob = None
+
+        # مسح المناطق عند انتهاء الصلاحية
+        if bull_fvg and (c_close < bull_fvg["bot"] or (i - bull_fvg["bar"]) > ZONE_MAX_AGE):
+            bull_fvg = None
+        if bear_fvg and (c_close > bear_fvg["top"] or (i - bear_fvg["bar"]) > ZONE_MAX_AGE):
+            bear_fvg = None
+        if bull_ob and (i - bull_ob["bar"]) > ZONE_MAX_AGE:
+            bull_ob = None
+        if bear_ob and (i - bear_ob["bar"]) > ZONE_MAX_AGE:
+            bear_ob = None
+        if bull_breaker and (i - bull_breaker["bar"]) > ZONE_MAX_AGE:
+            bull_breaker = None
+        if bear_breaker and (i - bear_breaker["bar"]) > ZONE_MAX_AGE:
+            bear_breaker = None
+
+    # فحص آخر شمعة مكتملة (Current Candle)
+    cur = df_h1.iloc[-1]
+    cur_h = cur["High"]
+    cur_l = cur["Low"]
+
+    # ملامسة مناطق الشراء أو البيع
+    in_bull_zone = False
+    bull_entry = 0.0
+    if bull_ob and cur_l <= bull_ob["top"] and cur_h >= bull_ob["bot"]:
+        in_bull_zone = True
+        bull_entry = (bull_ob["top"] + bull_ob["bot"]) / 2.0
+    elif bull_fvg and cur_l <= bull_fvg["top"] and cur_h >= bull_fvg["bot"]:
+        in_bull_zone = True
+        bull_entry = (bull_fvg["top"] + bull_fvg["bot"]) / 2.0
+    elif (
+        bull_breaker
+        and cur_l <= bull_breaker["top"]
+        and cur_h >= bull_breaker["bot"]
+    ):
+        in_bull_zone = True
+        bull_entry = (bull_breaker["top"] + bull_breaker["bot"]) / 2.0
+
+    in_bear_zone = False
+    bear_entry = 0.0
+    if bear_ob and cur_l <= bear_ob["top"] and cur_h >= bear_ob["bot"]:
+        in_bear_zone = True
+        bear_entry = (bear_ob["top"] + bear_ob["bot"]) / 2.0
+    elif bear_fvg and cur_l <= bear_fvg["top"] and cur_h >= bear_fvg["bot"]:
+        in_bear_zone = True
+        bear_entry = (bear_fvg["top"] + bear_fvg["bot"]) / 2.0
+    elif (
+        bear_breaker
+        and cur_l <= bear_breaker["top"]
+        and cur_h >= bear_breaker["bot"]
+    ):
+        in_bear_zone = True
+        bear_entry = (bear_breaker["top"] + bear_breaker["bot"]) / 2.0
+
+    # إشارات الدخول
+    bull_signal = htf_bias_up and structure_trend != -1 and in_bull_zone
+    bear_signal = htf_bias_down and structure_trend != 1 and in_bear_zone
+
+    # =====================================================
+    # تنفيذ صفقة الشراء
+    # =====================================================
+    if bull_signal:
+        nat_sl = (
+            (bull_entry - last_swing_low)
+            if last_swing_low is not None
+            else cfg["min_sl"]
+        )
+        sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
+        sl_final = bull_entry - sl_dist
+
+        if prev_swing_high is not None and prev_swing_high > bull_entry:
+            nat_tp = prev_swing_high - bull_entry
+        elif pd_high is not None and pd_high > bull_entry:
+            nat_tp = pd_high - bull_entry
+        else:
+            nat_tp = cfg["max_tp"]
+
+        tp_dist = max(min(nat_tp, cfg["max_tp"]), cfg["min_tp"])
+        tp_final = bull_entry + tp_dist
+        rr = tp_dist / sl_dist
+
+        entry_time_str = now_utc.strftime("%Y-%m-%d %H:%M")
+        msg = (
+            f"<b>🟢 إشارة دخول جديدة — {symbol_name}</b>\n"
+            f"<b>الاتجاه:</b> شراء (BUY)\n"
+            f"<b>نقطة الدخول:</b> {bull_entry:.{digits}f}\n"
+            f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
+            f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
+            f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
+            f"<b>التوقيت (UTC):</b> {entry_time_str}\n"
+            f"⚠️ تأكد دائماً من إدارة رأس المال!"
+        )
+        send_telegram(msg)
+
+        sym_state["active_trade"] = {
+            "side": "buy",
+            "entry": bull_entry,
+            "sl": sl_final,
+            "tp": tp_final,
+            "rr": rr,
+            "entry_time": entry_time_str,
+        }
+        sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
+
+    # =====================================================
+    # تنفيذ صفقة البيع
+    # =====================================================
+    elif bear_signal:
+        nat_sl = (
+            (last_swing_high - bear_entry)
+            if last_swing_high is not None
+            else cfg["min_sl"]
+        )
+        sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
+        sl_final = bear_entry + sl_dist
+
+        if prev_swing_low is not None and prev_swing_low < bear_entry:
+            nat_tp = bear_entry - prev_swing_low
+        elif pd_low is not None and pd_low < bear_entry:
+            nat_tp = bear_entry - pd_low
+        else:
+            nat_tp = cfg["max_tp"]
+
+        tp_dist = max(min(nat_tp, cfg["max_tp"]), cfg["min_tp"])
+        tp_final = bear_entry - tp_dist
+        rr = tp_dist / sl_dist
+
+        entry_time_str = now_utc.strftime("%Y-%m-%d %H:%M")
+        msg = (
+            f"<b>🔴 إشارة دخول جديدة — {symbol_name}</b>\n"
+            f"<b>الاتجاه:</b> بيع (SELL)\n"
+            f"<b>نقطة الدخول:</b> {bear_entry:.{digits}f}\n"
+            f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
+            f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
+            f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
+            f"<b>التوقيت (UTC):</b> {entry_time_str}\n"
+            f"⚠️ تأكد دائماً من إدارة رأس المال!"
+        )
+        send_telegram(msg)
+
+        sym_state["active_trade"] = {
+            "side": "sell",
+            "entry": bear_entry,
+            "sl": sl_final,
+            "tp": tp_final,
+            "rr": rr,
+            "entry_time": entry_time_str,
+        }
+        sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
+
+    state[symbol_name] = sym_state
 
 
-# =========================================================
+# =====================================================
 # نقطة التشغيل الرئيسية
-# =========================================================
-
+# =====================================================
 def main():
     now_utc = datetime.now(timezone.utc)
     state = load_state()
 
-    for name, cfg in SYMBOLS.items():
+    for name, cfg in PROFILES.items():
         try:
+            print(f"جاري فحص {name}...")
             process_symbol(name, cfg, state, now_utc)
         except Exception as e:
-            print(f"[{name}] خطأ غير متوقع: {e}")
+            print(f"[{name}] خطأ أثناء المعالجة: {e}")
 
     save_state(state)
 
