@@ -421,13 +421,8 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime
 # نقطة التشغيل الرئيسية
 # =====================================================
 def main():
-    # تحويل التوقيت إلى توقيت الموصل / بغداد
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(MOSUL_TZ)
-    time_str = now_local.strftime("%I:%M %p")
-
-    # إشعار الفحص بتوقيت الموصل ونظام 12 ساعة
-    send_telegram(f"🤖 <b>فحص ICT شغال بنجاح!</b>\n⏰ الوقت: {time_str} (توقيت الموصل)\n🔍 جاري فحص: الذهب (XAUUSD) واليورو (EURUSD)...")
 
     state = load_state()
 
