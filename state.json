@@ -1,8 +1,8 @@
 {
     "XAUUSD": {
         "active_trade": null,
-        "trades_today": 1,
-        "last_date": "2026-09-15"
+        "trades_today": 0,
+        "last_date": "2026-09-16"
     },
     "EURUSD": {
         "active_trade": {
@@ -13,7 +13,7 @@
             "rr": 1.6260162601625165,
             "entry_time": "05:42 PM"
         },
-        "trades_today": 1,
-        "last_date": "2026-09-15"
+        "trades_today": 0,
+        "last_date": "2026-09-16"
     }
 }
