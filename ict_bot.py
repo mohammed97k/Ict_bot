@@ -15,10 +15,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "f66d01dd648c41898a1d908f17fff5a0")
 STATE_FILE = "state.json"
 
-# المنطقة الزمنية للموصل / العراق
+# التوقيت المحلي للموصل / العراق
 MOSUL_TZ = zoneinfo.ZoneInfo("Asia/Baghdad")
 
-# ملف تعريف الأصول: الذهب واليورو حصراً
+# ملف تعريف الأصول والحدود
 PROFILES = {
     "XAUUSD": {
         "symbol": "XAU/USD",
@@ -29,6 +29,7 @@ PROFILES = {
         "max_sl": 15.0,
         "min_tp": 15.0,
         "max_tp": 30.0,
+        "max_drift": 2.5,  # أقصى ابتعاد مسموح به عن المنطقة بالدولار
     },
     "EURUSD": {
         "symbol": "EUR/USD",
@@ -39,6 +40,7 @@ PROFILES = {
         "max_sl": 0.0035,
         "min_tp": 0.0030,
         "max_tp": 0.0070,
+        "max_drift": 0.0015,  # أقصى ابتعاد مسموح به (15 نقطة)
     },
 }
 
@@ -156,12 +158,12 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime
     sym = cfg["symbol"]
     digits = cfg["digits"]
     mult = cfg["point_mult"]
+    max_drift = cfg.get("max_drift", 2.0)
 
-    # جلب بيانات فريم الساعة (1h)
+    # جلب بيانات فريم الساعة وفريم اليومي
     df_h1 = fetch_twelve_data(sym, "1h", 120)
     time.sleep(8)
 
-    # جلب بيانات فريم اليومي (1day)
     df_d = fetch_twelve_data(sym, "1day", 80)
     time.sleep(8)
 
@@ -181,12 +183,12 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime
 
     df_h1["ATR14"] = calc_atr(df_h1, 14)
 
-    # 1. متابعة الصفقات المفتوحة (الهدف أو الستوب)
+    # 1. متابعة الصفقات المفتوحة لحظياً (ضرب الستوب أو الهدف)
     active_trade = sym_state.get("active_trade")
     if active_trade is not None:
-        latest_candle = df_h1.iloc[-1]
-        c_high = float(latest_candle["High"])
-        c_low = float(latest_candle["Low"])
+        live_candle = df_h1.iloc[-1]
+        c_high = float(live_candle["High"])
+        c_low = float(live_candle["Low"])
 
         side = active_trade["side"]
         entry = active_trade["entry"]
@@ -228,7 +230,11 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime
         state[symbol_name] = sym_state
         return
 
-    n = len(df_h1)
+    # نحسب الهيكل والـ FVG والـ OB على الشموع المؤكدة حصراً حتى [len - 2]
+    # الشمعة [len - 1] هي الشمعة الجارية الآن (الحية)
+    total_candles = len(df_h1)
+    confirmed_candles_count = total_candles - 1
+
     last_swing_high = None
     prev_swing_high = None
     last_swing_low = None
@@ -242,7 +248,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime
     bull_breaker = None
     bear_breaker = None
 
-    for i in range(SWING_LEN * 2, n):
+    for i in range(SWING_LEN * 2, confirmed_candles_count):
         window_high = df_h1["High"].iloc[i - SWING_LEN * 2 : i + 1]
         mid_idx = i - SWING_LEN
         if df_h1["High"].iloc[mid_idx] == window_high.max():
@@ -292,133 +298,143 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_local: datetime
             bull_breaker = {"top": bear_ob["top"], "bot": bear_ob["bot"], "bar": i}
             bear_ob = None
 
-        if bull_fvg and (c_close < bull_fvg["bot"] or (i - bull_fvg["bar"]) > ZONE_MAX_AGE):
+        if bull_fvg and (c_close < bull_fvg["bot"] or (confirmed_candles_count - bull_fvg["bar"]) > ZONE_MAX_AGE):
             bull_fvg = None
-        if bear_fvg and (c_close > bear_fvg["top"] or (i - bear_fvg["bar"]) > ZONE_MAX_AGE):
+        if bear_fvg and (c_close > bear_fvg["top"] or (confirmed_candles_count - bear_fvg["bar"]) > ZONE_MAX_AGE):
             bear_fvg = None
-        if bull_ob and (i - bull_ob["bar"]) > ZONE_MAX_AGE:
+        if bull_ob and (confirmed_candles_count - bull_ob["bar"]) > ZONE_MAX_AGE:
             bull_ob = None
-        if bear_ob and (i - bear_ob["bar"]) > ZONE_MAX_AGE:
+        if bear_ob and (confirmed_candles_count - bear_ob["bar"]) > ZONE_MAX_AGE:
             bear_ob = None
-        if bull_breaker and (i - bull_breaker["bar"]) > ZONE_MAX_AGE:
+        if bull_breaker and (confirmed_candles_count - bull_breaker["bar"]) > ZONE_MAX_AGE:
             bull_breaker = None
-        if bear_breaker and (i - bear_breaker["bar"]) > ZONE_MAX_AGE:
+        if bear_breaker and (confirmed_candles_count - bear_breaker["bar"]) > ZONE_MAX_AGE:
             bear_breaker = None
 
-    cur = df_h1.iloc[-1]
-    cur_h = cur["High"]
-    cur_l = cur["Low"]
+    # فحص الشمعة الحية الحالية (live candle) لرصد أي ملامسة سريعة في منتصف الساعة
+    live_candle = df_h1.iloc[-1]
+    live_h = float(live_candle["High"])
+    live_l = float(live_candle["Low"])
+    current_price = float(live_candle["Close"])
 
     in_bull_zone = False
     bull_entry = 0.0
-    if bull_ob and cur_l <= bull_ob["top"] and cur_h >= bull_ob["bot"]:
+    if bull_ob and live_l <= bull_ob["top"] and live_h >= bull_ob["bot"]:
         in_bull_zone = True
         bull_entry = (bull_ob["top"] + bull_ob["bot"]) / 2.0
-    elif bull_fvg and cur_l <= bull_fvg["top"] and cur_h >= bull_fvg["bot"]:
+    elif bull_fvg and live_l <= bull_fvg["top"] and live_h >= bull_fvg["bot"]:
         in_bull_zone = True
         bull_entry = (bull_fvg["top"] + bull_fvg["bot"]) / 2.0
-    elif bull_breaker and cur_l <= bull_breaker["top"] and cur_h >= bull_breaker["bot"]:
+    elif bull_breaker and live_l <= bull_breaker["top"] and live_h >= bull_breaker["bot"]:
         in_bull_zone = True
         bull_entry = (bull_breaker["top"] + bull_breaker["bot"]) / 2.0
 
     in_bear_zone = False
     bear_entry = 0.0
-    if bear_ob and cur_l <= bear_ob["top"] and cur_h >= bear_ob["bot"]:
+    if bear_ob and live_l <= bear_ob["top"] and live_h >= bear_ob["bot"]:
         in_bear_zone = True
         bear_entry = (bear_ob["top"] + bear_ob["bot"]) / 2.0
-    elif bear_fvg and cur_l <= bear_fvg["top"] and cur_h >= bear_fvg["bot"]:
+    elif bear_fvg and live_l <= bear_fvg["top"] and live_h >= bear_fvg["bot"]:
         in_bear_zone = True
         bear_entry = (bear_fvg["top"] + bear_fvg["bot"]) / 2.0
-    elif bear_breaker and cur_l <= bear_breaker["top"] and cur_h >= bear_breaker["bot"]:
+    elif bear_breaker and live_l <= bear_breaker["top"] and live_h >= bear_breaker["bot"]:
         in_bear_zone = True
         bear_entry = (bear_breaker["top"] + bear_breaker["bot"]) / 2.0
 
     bull_signal = htf_bias_up and structure_trend != -1 and in_bull_zone
     bear_signal = htf_bias_down and structure_trend != 1 and in_bear_zone
 
+    # تنفيذ صفقة الشراء إذا كان السعر لم يبتعد كثيراً
     if bull_signal:
-        nat_sl = (bull_entry - last_swing_low) if last_swing_low is not None else cfg["min_sl"]
-        sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
-        sl_final = bull_entry - sl_dist
+        drift = abs(current_price - bull_entry)
+        if drift <= max_drift:
+            nat_sl = (bull_entry - last_swing_low) if last_swing_low is not None else cfg["min_sl"]
+            sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
+            sl_final = bull_entry - sl_dist
 
-        if prev_swing_high and prev_swing_high > bull_entry:
-            nat_tp = prev_swing_high - bull_entry
-        elif pd_high and pd_high > bull_entry:
-            nat_tp = pd_high - bull_entry
-        else:
-            nat_tp = cfg["max_tp"]
+            if prev_swing_high and prev_swing_high > bull_entry:
+                nat_tp = prev_swing_high - bull_entry
+            elif pd_high and pd_high > bull_entry:
+                nat_tp = pd_high - bull_entry
+            else:
+                nat_tp = cfg["max_tp"]
 
-        tp_dist = max(min(nat_tp, cfg["max_tp"]), cfg["min_tp"])
-        tp_final = bull_entry + tp_dist
-        rr = tp_dist / sl_dist
+            tp_dist = max(min(nat_tp, cfg["max_tp"]), cfg["min_tp"])
+            tp_final = bull_entry + tp_dist
+            rr = tp_dist / sl_dist
 
-        entry_time_str = now_local.strftime("%I:%M %p")
-        msg = (
-            f"<b>🟢 إشارة دخول جديدة — {symbol_name}</b>\n"
-            f"<b>الاتجاه:</b> شراء (BUY)\n"
-            f"<b>نقطة الدخول:</b> {bull_entry:.{digits}f}\n"
-            f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
-            f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
-            f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
-            f"<b>وقت الدخول:</b> {entry_time_str} (توقيت الموصل)\n"
-            f"⚠️ إدارة رأس المال أولاً!"
-        )
-        send_telegram(msg)
+            entry_time_str = now_local.strftime("%I:%M %p")
+            msg = (
+                f"<b>🟢 إشارة دخول فورية — {symbol_name}</b>\n"
+                f"<b>الاتجاه:</b> شراء (BUY)\n"
+                f"<b>نقطة الدخول (المنطقة):</b> {bull_entry:.{digits}f}\n"
+                f"<b>السعر الحالي:</b> {current_price:.{digits}f}\n"
+                f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
+                f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
+                f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
+                f"<b>وقت الدخول:</b> {entry_time_str} (توقيت الموصل)\n"
+                f"⚠️ إدارة رأس المال أولاً!"
+            )
+            send_telegram(msg)
 
-        sym_state["active_trade"] = {
-            "side": "buy",
-            "entry": bull_entry,
-            "sl": sl_final,
-            "tp": tp_final,
-            "rr": rr,
-            "entry_time": entry_time_str,
-        }
-        sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
+            sym_state["active_trade"] = {
+                "side": "buy",
+                "entry": bull_entry,
+                "sl": sl_final,
+                "tp": tp_final,
+                "rr": rr,
+                "entry_time": entry_time_str,
+            }
+            sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
 
+    # تنفيذ صفقة البيع إذا كان السعر لم يبتعد كثيراً
     elif bear_signal:
-        nat_sl = (last_swing_high - bear_entry) if last_swing_high is not None else cfg["min_sl"]
-        sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
-        sl_final = bear_entry + sl_dist
+        drift = abs(current_price - bear_entry)
+        if drift <= max_drift:
+            nat_sl = (last_swing_high - bear_entry) if last_swing_high is not None else cfg["min_sl"]
+            sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
+            sl_final = bear_entry + sl_dist
 
-        if prev_swing_low and prev_swing_low < bear_entry:
-            nat_tp = bear_entry - prev_swing_low
-        elif pd_low and pd_low < bear_entry:
-            nat_tp = bear_entry - pd_low
-        else:
-            nat_tp = cfg["max_tp"]
+            if prev_swing_low and prev_swing_low < bear_entry:
+                nat_tp = bear_entry - prev_swing_low
+            elif pd_low and pd_low < bear_entry:
+                nat_tp = bear_entry - pd_low
+            else:
+                nat_tp = cfg["max_tp"]
 
-        tp_dist = max(min(nat_tp, cfg["max_tp"]), cfg["min_tp"])
-        tp_final = bear_entry - tp_dist
-        rr = tp_dist / sl_dist
+            tp_dist = max(min(nat_tp, cfg["max_tp"]), cfg["min_tp"])
+            tp_final = bear_entry - tp_dist
+            rr = tp_dist / sl_dist
 
-        entry_time_str = now_local.strftime("%I:%M %p")
-        msg = (
-            f"<b>🔴 إشارة دخول جديدة — {symbol_name}</b>\n"
-            f"<b>الاتجاه:</b> بيع (SELL)\n"
-            f"<b>نقطة الدخول:</b> {bear_entry:.{digits}f}\n"
-            f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
-            f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
-            f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
-            f"<b>التوقيت:</b> {entry_time_str} (توقيت الموصل)\n"
-            f"⚠️ إدارة رأس المال أولاً!"
-        )
-        send_telegram(msg)
+            entry_time_str = now_local.strftime("%I:%M %p")
+            msg = (
+                f"<b>🔴 إشارة دخول فورية — {symbol_name}</b>\n"
+                f"<b>الاتجاه:</b> بيع (SELL)\n"
+                f"<b>نقطة الدخول (المنطقة):</b> {bear_entry:.{digits}f}\n"
+                f"<b>السعر الحالي:</b> {current_price:.{digits}f}\n"
+                f"<b>الستوب (SL):</b> {sl_final:.{digits}f}\n"
+                f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
+                f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
+                f"<b>التوقيت:</b> {entry_time_str} (توقيت الموصل)\n"
+                f"⚠️ إدارة رأس المال أولاً!"
+            )
+            send_telegram(msg)
 
-        sym_state["active_trade"] = {
-            "side": "sell",
-            "entry": bear_entry,
-            "sl": sl_final,
-            "tp": tp_final,
-            "rr": rr,
-            "entry_time": entry_time_str,
-        }
-        sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
+            sym_state["active_trade"] = {
+                "side": "sell",
+                "entry": bear_entry,
+                "sl": sl_final,
+                "tp": tp_final,
+                "rr": rr,
+                "entry_time": entry_time_str,
+            }
+            sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
 
     state[symbol_name] = sym_state
 
 
 # =====================================================
-# نقطة التشغيل الرئيسية
+# نقطة التشغيل الرئيسية (صامتة بدون رسائل دورية)
 # =====================================================
 def main():
     now_utc = datetime.now(timezone.utc)
