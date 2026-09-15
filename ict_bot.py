@@ -1,23 +1,23 @@
 import json
 import math
 import os
+import time
 from datetime import datetime, timezone
-import numpy as np
 import pandas as pd
 import requests
-import yfinance as yf
 
 # =====================================================
 # الإعدادات وقنوات التليجرام
 # =====================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "f66d01dd648c41898a1d908f17fff5a0")
 STATE_FILE = "state.json"
 
-# ملف تعريف الأصول والحدود المطابقة لكود Pine Script
+# ملف تعريف الأصول والرموز الخاصة بـ Twelve Data
 PROFILES = {
     "XAUUSD": {
-        "ticker": "GC=F",
+        "symbol": "XAU/USD",
         "profile": "GOLD",
         "digits": 2,
         "point_mult": 10.0,
@@ -26,8 +26,18 @@ PROFILES = {
         "min_tp": 15.0,
         "max_tp": 30.0,
     },
+    "EURUSD": {
+        "symbol": "EUR/USD",
+        "profile": "FOREX",
+        "digits": 5,
+        "point_mult": 10000.0,
+        "min_sl": 0.0015,
+        "max_sl": 0.0035,
+        "min_tp": 0.0030,
+        "max_tp": 0.0070,
+    },
     "US30": {
-        "ticker": "YM=F",
+        "symbol": "DJI",
         "profile": "US30",
         "digits": 1,
         "point_mult": 1.0,
@@ -37,7 +47,7 @@ PROFILES = {
         "max_tp": 350.0,
     },
     "NAS100": {
-        "ticker": "NQ=F",
+        "symbol": "IXIC",
         "profile": "NAS100",
         "digits": 2,
         "point_mult": 1.0,
@@ -45,16 +55,6 @@ PROFILES = {
         "max_sl": 150.0,
         "min_tp": 150.0,
         "max_tp": 350.0,
-    },
-    "EURUSD": {
-        "ticker": "EURUSD=X",
-        "profile": "FOREX",
-        "digits": 5,
-        "point_mult": 10000.0,
-        "min_sl": 0.0015,
-        "max_sl": 0.0035,
-        "min_tp": 0.0030,
-        "max_tp": 0.0070,
     },
 }
 
@@ -107,7 +107,43 @@ def save_state(state):
 
 
 # =====================================================
-# المؤشرات الفنية المساعدة
+# جلب البيانات من Twelve Data
+# =====================================================
+def fetch_twelve_data(symbol: str, interval: str, outputsize: int = 100):
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVE_DATA_API_KEY,
+    }
+    try:
+        res = requests.get(url, params=params, timeout=20)
+        data = res.json()
+        if "values" not in data:
+            print(f"خطأ جلب بيانات {symbol} ({interval}): {data.get('message', data)}")
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(data["values"])
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.sort_values("datetime").reset_index(drop=True)
+        for col in ["open", "high", "low", "close"]:
+            df[col] = df[col].astype(float)
+        
+        df.rename(columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close"
+        }, inplace=True)
+        return df
+    except Exception as e:
+        print(f"استثناء أثناء طلب Twelve Data لـ {symbol}: {e}")
+        return pd.DataFrame()
+
+
+# =====================================================
+# الحسابات الفنية
 # =====================================================
 def calc_atr(df: pd.DataFrame, period: int = 14):
     high = df["High"]
@@ -121,7 +157,7 @@ def calc_atr(df: pd.DataFrame, period: int = 14):
 
 
 # =====================================================
-# معالجة الرمز الواحد (ICT Engine)
+# محرك الاستراتيجية
 # =====================================================
 def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
     today_str = now_utc.strftime("%Y-%m-%d")
@@ -129,30 +165,27 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         symbol_name, {"active_trade": None, "trades_today": 0, "last_date": today_str}
     )
 
-    # تصفير عدد الصفقات اليومية مع بداية كل يوم جديد
     if sym_state.get("last_date") != today_str:
         sym_state["trades_today"] = 0
         sym_state["last_date"] = today_str
 
-    ticker = cfg["ticker"]
+    sym = cfg["symbol"]
     digits = cfg["digits"]
     mult = cfg["point_mult"]
 
-    # جلب بيانات الساعة (H1) واليومي (D)
-    df_h1 = yf.download(ticker, period="30d", interval="1h", progress=False)
-    df_d = yf.download(ticker, period="100d", interval="1d", progress=False)
+    # جلب بيانات فريم الساعة (1h)
+    df_h1 = fetch_twelve_data(sym, "1h", 120)
+    time.sleep(8)  # احترام حد الـ Rate Limit
 
-    if df_h1.empty or df_d.empty or len(df_h1) < 60 or len(df_d) < HTF_EMA_LEN:
-        print(f"[{symbol_name}] البيانات غير كافية.")
+    # جلب بيانات فريم اليومي (1day)
+    df_d = fetch_twelve_data(sym, "1day", 80)
+    time.sleep(8)
+
+    if df_h1.empty or df_d.empty or len(df_h1) < 40 or len(df_d) < HTF_EMA_LEN:
+        print(f"[{symbol_name}] البيانات غير كافية أو تعذر الوصول للمزود.")
         return
 
-    # تسطيح الأعمدة إذا لزم الأمر في التحديثات الجديدة لـ yfinance
-    if isinstance(df_h1.columns, pd.MultiIndex):
-        df_h1.columns = [c[0] for c in df_h1.columns]
-    if isinstance(df_d.columns, pd.MultiIndex):
-        df_d.columns = [c[0] for c in df_d.columns]
-
-    # حساب اليوم السابق والـ HTF Bias
+    # التحيز اليومي HTF Bias
     df_d["EMA50"] = df_d["Close"].ewm(span=HTF_EMA_LEN, adjust=False).mean()
     last_d_close = df_d["Close"].iloc[-1]
     last_d_ema = df_d["EMA50"].iloc[-1]
@@ -162,12 +195,9 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
     htf_bias_up = last_d_close > last_d_ema
     htf_bias_down = last_d_close < last_d_ema
 
-    # حساب ATR
     df_h1["ATR14"] = calc_atr(df_h1, 14)
 
-    # =====================================================
-    # 1. متابعة الصفقات النشطة أولاً (إشعار الهدف أو الستوب)
-    # =====================================================
+    # 1. متابعة الصفقات المفتوحة (الهدف أو الستوب)
     active_trade = sym_state.get("active_trade")
     if active_trade is not None:
         latest_candle = df_h1.iloc[-1]
@@ -181,15 +211,8 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         rr = active_trade["rr"]
         entry_time = active_trade["entry_time"]
 
-        hit_tp = False
-        hit_sl = False
-
-        if side == "buy":
-            hit_tp = c_high >= tp
-            hit_sl = c_low <= sl
-        elif side == "sell":
-            hit_tp = c_low <= tp
-            hit_sl = c_high >= sl
+        hit_tp = (c_high >= tp) if side == "buy" else (c_low <= tp)
+        hit_sl = (c_low <= sl) if side == "buy" else (c_high >= sl)
 
         if hit_tp or hit_sl:
             outcome = "🎯 ضرب الهدف (TP)" if hit_tp else "🛑 ضرب الستوب (SL)"
@@ -212,9 +235,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
             state[symbol_name] = sym_state
             return
 
-    # =====================================================
     # 2. فحص إمكانية فتح صفقة جديدة
-    # =====================================================
     if (
         sym_state.get("active_trade") is not None
         or sym_state.get("trades_today", 0) >= MAX_TRADES_PER_DAY
@@ -222,7 +243,6 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         state[symbol_name] = sym_state
         return
 
-    # محاكاة بنية السوق والمناطق (FVG, OB, Breaker)
     n = len(df_h1)
     last_swing_high = None
     prev_swing_high = None
@@ -238,7 +258,6 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
     bear_breaker = None
 
     for i in range(SWING_LEN * 2, n):
-        # الكشف عن القمم والقيعان المحورية (Pivot High / Low)
         window_high = df_h1["High"].iloc[i - SWING_LEN * 2 : i + 1]
         mid_idx = i - SWING_LEN
         if df_h1["High"].iloc[mid_idx] == window_high.max():
@@ -261,33 +280,17 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         p_high = df_h1["High"].iloc[i - 1]
         p_low = df_h1["Low"].iloc[i - 1]
 
-        # كسر بنية السوق (MSS)
-        if (
-            last_swing_high is not None
-            and c_close > last_swing_high
-            and structure_trend <= 0
-        ):
+        if last_swing_high and c_close > last_swing_high and structure_trend <= 0:
             structure_trend = 1
-        elif (
-            last_swing_low is not None
-            and c_close < last_swing_low
-            and structure_trend >= 0
-        ):
+        elif last_swing_low and c_close < last_swing_low and structure_trend >= 0:
             structure_trend = -1
 
-        # فحص الفجوات السعرية (FVG)
         if i >= 2 and not math.isnan(c_atr):
-            low_now = c_low
-            high_2 = df_h1["High"].iloc[i - 2]
-            high_now = c_high
-            low_2 = df_h1["Low"].iloc[i - 2]
+            if c_low > df_h1["High"].iloc[i - 2] and (c_low - df_h1["High"].iloc[i - 2]) > (c_atr * FVG_MIN_ATR_PCT):
+                bull_fvg = {"top": c_low, "bot": df_h1["High"].iloc[i - 2], "bar": i}
+            if c_high < df_h1["Low"].iloc[i - 2] and (df_h1["Low"].iloc[i - 2] - c_high) > (c_atr * FVG_MIN_ATR_PCT):
+                bear_fvg = {"top": df_h1["Low"].iloc[i - 2], "bot": c_high, "bar": i}
 
-            if low_now > high_2 and (low_now - high_2) > (c_atr * FVG_MIN_ATR_PCT):
-                bull_fvg = {"top": low_now, "bot": high_2, "bar": i}
-            if high_now < low_2 and (low_2 - high_now) > (c_atr * FVG_MIN_ATR_PCT):
-                bear_fvg = {"top": low_2, "bot": high_now, "bar": i}
-
-        # فحص كتل الأوامر (Order Blocks)
         candle_range = c_high - c_low
         is_disp = not math.isnan(c_atr) and candle_range > (c_atr * DISP_MULT)
 
@@ -296,16 +299,14 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         if is_disp and c_close < c_open and p_close > p_open:
             bear_ob = {"top": p_high, "bot": p_low, "bar": i}
 
-        # تحول OB إلى Breaker Block
-        if bull_ob is not None and c_close < bull_ob["bot"]:
+        if bull_ob and c_close < bull_ob["bot"]:
             bear_breaker = {"top": bull_ob["top"], "bot": bull_ob["bot"], "bar": i}
             bull_ob = None
 
-        if bear_ob is not None and c_close > bear_ob["top"]:
+        if bear_ob and c_close > bear_ob["top"]:
             bull_breaker = {"top": bear_ob["top"], "bot": bear_ob["bot"], "bar": i}
             bear_ob = None
 
-        # مسح المناطق عند انتهاء الصلاحية
         if bull_fvg and (c_close < bull_fvg["bot"] or (i - bull_fvg["bar"]) > ZONE_MAX_AGE):
             bull_fvg = None
         if bear_fvg and (c_close > bear_fvg["top"] or (i - bear_fvg["bar"]) > ZONE_MAX_AGE):
@@ -319,12 +320,10 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         if bear_breaker and (i - bear_breaker["bar"]) > ZONE_MAX_AGE:
             bear_breaker = None
 
-    # فحص آخر شمعة مكتملة (Current Candle)
     cur = df_h1.iloc[-1]
     cur_h = cur["High"]
     cur_l = cur["Low"]
 
-    # ملامسة مناطق الشراء أو البيع
     in_bull_zone = False
     bull_entry = 0.0
     if bull_ob and cur_l <= bull_ob["top"] and cur_h >= bull_ob["bot"]:
@@ -333,11 +332,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
     elif bull_fvg and cur_l <= bull_fvg["top"] and cur_h >= bull_fvg["bot"]:
         in_bull_zone = True
         bull_entry = (bull_fvg["top"] + bull_fvg["bot"]) / 2.0
-    elif (
-        bull_breaker
-        and cur_l <= bull_breaker["top"]
-        and cur_h >= bull_breaker["bot"]
-    ):
+    elif bull_breaker and cur_l <= bull_breaker["top"] and cur_h >= bull_breaker["bot"]:
         in_bull_zone = True
         bull_entry = (bull_breaker["top"] + bull_breaker["bot"]) / 2.0
 
@@ -349,33 +344,21 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
     elif bear_fvg and cur_l <= bear_fvg["top"] and cur_h >= bear_fvg["bot"]:
         in_bear_zone = True
         bear_entry = (bear_fvg["top"] + bear_fvg["bot"]) / 2.0
-    elif (
-        bear_breaker
-        and cur_l <= bear_breaker["top"]
-        and cur_h >= bear_breaker["bot"]
-    ):
+    elif bear_breaker and cur_l <= bear_breaker["top"] and cur_h >= bear_breaker["bot"]:
         in_bear_zone = True
         bear_entry = (bear_breaker["top"] + bear_breaker["bot"]) / 2.0
 
-    # إشارات الدخول
     bull_signal = htf_bias_up and structure_trend != -1 and in_bull_zone
     bear_signal = htf_bias_down and structure_trend != 1 and in_bear_zone
 
-    # =====================================================
-    # تنفيذ صفقة الشراء
-    # =====================================================
     if bull_signal:
-        nat_sl = (
-            (bull_entry - last_swing_low)
-            if last_swing_low is not None
-            else cfg["min_sl"]
-        )
+        nat_sl = (bull_entry - last_swing_low) if last_swing_low is not None else cfg["min_sl"]
         sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
         sl_final = bull_entry - sl_dist
 
-        if prev_swing_high is not None and prev_swing_high > bull_entry:
+        if prev_swing_high and prev_swing_high > bull_entry:
             nat_tp = prev_swing_high - bull_entry
-        elif pd_high is not None and pd_high > bull_entry:
+        elif pd_high and pd_high > bull_entry:
             nat_tp = pd_high - bull_entry
         else:
             nat_tp = cfg["max_tp"]
@@ -393,7 +376,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
             f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
             f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
             f"<b>التوقيت (UTC):</b> {entry_time_str}\n"
-            f"⚠️ تأكد دائماً من إدارة رأس المال!"
+            f"⚠️ إدارة رأس المال أولاً!"
         )
         send_telegram(msg)
 
@@ -407,21 +390,14 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
         }
         sym_state["trades_today"] = sym_state.get("trades_today", 0) + 1
 
-    # =====================================================
-    # تنفيذ صفقة البيع
-    # =====================================================
     elif bear_signal:
-        nat_sl = (
-            (last_swing_high - bear_entry)
-            if last_swing_high is not None
-            else cfg["min_sl"]
-        )
+        nat_sl = (last_swing_high - bear_entry) if last_swing_high is not None else cfg["min_sl"]
         sl_dist = max(min(nat_sl, cfg["max_sl"]), cfg["min_sl"])
         sl_final = bear_entry + sl_dist
 
-        if prev_swing_low is not None and prev_swing_low < bear_entry:
+        if prev_swing_low and prev_swing_low < bear_entry:
             nat_tp = bear_entry - prev_swing_low
-        elif pd_low is not None and pd_low < bear_entry:
+        elif pd_low and pd_low < bear_entry:
             nat_tp = bear_entry - pd_low
         else:
             nat_tp = cfg["max_tp"]
@@ -439,7 +415,7 @@ def process_symbol(symbol_name: str, cfg: dict, state: dict, now_utc: datetime):
             f"<b>الهدف (TP):</b> {tp_final:.{digits}f}\n"
             f"<b>العائد للمخاطرة R:R:</b> 1:{rr:.2f}\n"
             f"<b>التوقيت (UTC):</b> {entry_time_str}\n"
-            f"⚠️ تأكد دائماً من إدارة رأس المال!"
+            f"⚠️ إدارة رأس المال أولاً!"
         )
         send_telegram(msg)
 
