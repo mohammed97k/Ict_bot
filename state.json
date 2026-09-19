@@ -2,7 +2,7 @@
     "XAUUSD": {
         "active_trade": null,
         "trades_today": 0,
-        "last_date": "2026-09-19"
+        "last_date": "2026-09-20"
     },
     "EURUSD": {
         "active_trade": {
@@ -14,6 +14,6 @@
             "entry_time": "04:08 PM"
         },
         "trades_today": 0,
-        "last_date": "2026-09-19"
+        "last_date": "2026-09-20"
     }
 }
