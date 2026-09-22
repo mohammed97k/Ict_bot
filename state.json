@@ -1,13 +1,6 @@
 {
     "XAUUSD": {
-        "active_trade": {
-            "side": "sell",
-            "entry": 4339.7158899999995,
-            "sl": 4354.7158899999995,
-            "tp": 4321.23191,
-            "rr": 1.232265333333271,
-            "entry_time": "03:32 PM"
-        },
+        "active_trade": null,
         "trades_today": 1,
         "last_date": "2026-09-22"
     },
