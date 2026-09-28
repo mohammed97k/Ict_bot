@@ -8,8 +8,8 @@
             "rr": 2.0,
             "entry_time": "08:13 PM"
         },
-        "trades_today": 1,
-        "last_date": "2026-09-28"
+        "trades_today": 0,
+        "last_date": "2026-09-29"
     },
     "EURUSD": {
         "active_trade": {
@@ -21,6 +21,6 @@
             "entry_time": "09:12 PM"
         },
         "trades_today": 0,
-        "last_date": "2026-09-28"
+        "last_date": "2026-09-29"
     }
 }
