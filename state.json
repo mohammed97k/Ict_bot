@@ -5,14 +5,7 @@
         "last_date": "2026-09-30"
     },
     "EURUSD": {
-        "active_trade": {
-            "side": "sell",
-            "entry": 1.1323400000000001,
-            "sl": 1.1358400000000002,
-            "tp": 1.1253400000000002,
-            "rr": 2.0,
-            "entry_time": "09:15 PM"
-        },
+        "active_trade": null,
         "trades_today": 0,
         "last_date": "2026-09-30"
     }
