@@ -9,7 +9,7 @@
             "entry_time": "10:14 PM"
         },
         "trades_today": 0,
-        "last_date": "2026-10-03"
+        "last_date": "2026-10-04"
     },
     "EURUSD": {
         "active_trade": {
@@ -21,6 +21,6 @@
             "entry_time": "11:34 PM"
         },
         "trades_today": 0,
-        "last_date": "2026-10-03"
+        "last_date": "2026-10-04"
     }
 }
