@@ -9,7 +9,6 @@ from config.settings import (
 
 
 def atr_rma(high, low, close, length=14):
-    """ATR بنفس طريقة Pine Script (RMA)."""
     tr = pd.concat([
         high - low,
         (high - close.shift()).abs(),
@@ -19,7 +18,6 @@ def atr_rma(high, low, close, length=14):
 
 
 def pivothigh(high, left, right):
-    """Pivot High — مطابق لـ ta.pivothigh في Pine."""
     arr = high.values
     n = len(arr)
     out = np.full(n, np.nan)
@@ -31,7 +29,6 @@ def pivothigh(high, left, right):
 
 
 def pivotlow(low, left, right):
-    """Pivot Low — مطابق لـ ta.pivotlow في Pine."""
     arr = low.values
     n = len(arr)
     out = np.full(n, np.nan)
@@ -49,7 +46,6 @@ class ICTStrategy:
         self.trades = {k: {"alive": False, "last_bar": -9999} for k in ENABLED_MODELS}
         self.stats = {k: {"tr": 0, "w": 0} for k in ENABLED_MODELS}
 
-        # حالة السوق
         self.last_hi = np.nan
         self.last_lo = np.nan
         self.last_ssl = -9999
@@ -90,19 +86,21 @@ class ICTStrategy:
 
     @staticmethod
     def _in_window(t, start, end):
-        """فحص النافذة الزمنية (EST)."""
         s = datetime.strptime(start, "%H:%M").time()
         e = datetime.strptime(end, "%H:%M").time()
         return s <= t.time() <= e
 
-    def process(self, df):
-        """معالجة الشموع وإرجاع قائمة الإشارات الجديدة."""
+    # ═══════════════════════════════════════════════════════
+    #  الدالة الجديدة: تعالج التاريخ لبناء الحالة،
+    #  لكن تفتح الصفقات فقط بعد cutoff_time
+    # ═══════════════════════════════════════════════════════
+    def process_new(self, df_full, cutoff_time):
         signals = []
-        df = df.copy()
-        df["atr"]    = atr_rma(df["high"], df["low"], df["close"], 14)
+        df = df_full.copy()
+        df["atr"] = atr_rma(df["high"], df["low"], df["close"], 14)
         df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
         df["piv_hi"] = pivothigh(df["high"], PIVOT_LEN, PIVOT_LEN)
-        df["piv_lo"] = pivotlow(df["low"],  PIVOT_LEN, PIVOT_LEN)
+        df["piv_lo"] = pivotlow(df["low"], PIVOT_LEN, PIVOT_LEN)
 
         for i in range(PIVOT_LEN + 2, len(df)):
             row = df.iloc[i]
@@ -110,47 +108,40 @@ class ICTStrategy:
             c = row["close"]; h = row["high"]; l = row["low"]; o = row["open"]
             atr = row["atr"]; ema200 = row["ema200"]
 
-            # إعادة تعيين يومياً
             day = t.date()
             if day != self.cur_day:
                 self.cur_day = day
                 self.daily_trades = 0
 
-            # Midnight Open (00:00 EST)
             if t.hour == 0 and t.minute == 0:
                 self.midnight_open = o
 
-            # Pivots
             if not np.isnan(row["piv_hi"]):
                 self.last_hi = row["piv_hi"]
             if not np.isnan(row["piv_lo"]):
                 self.last_lo = row["piv_lo"]
 
-            # Sweeps
             sweep_ssl = (not np.isnan(self.last_lo)) and (l < self.last_lo) and (c > self.last_lo)
             sweep_bsl = (not np.isnan(self.last_hi)) and (h > self.last_hi) and (c < self.last_hi)
             if sweep_ssl: self.last_ssl = i
             if sweep_bsl: self.last_bsl = i
 
-            # MSS + Displacement
-            displace  = (h - l) > DISPLACE_MULT * atr
-            mss_bull  = (not np.isnan(self.last_hi)) and (c > self.last_hi) and displace
-            mss_bear  = (not np.isnan(self.last_lo)) and (c < self.last_lo) and displace
+            displace = (h - l) > DISPLACE_MULT * atr
+            mss_bull = (not np.isnan(self.last_hi)) and (c > self.last_hi) and displace
+            mss_bear = (not np.isnan(self.last_lo)) and (c < self.last_lo) and displace
             if mss_bull: self.last_mssb = i
             if mss_bear: self.last_msss = i
 
-            # FVG
             if i >= 2:
                 if l > df["high"].iloc[i-2]:
-                    self.b_fvg_hi  = l
-                    self.b_fvg_lo  = df["high"].iloc[i-2]
+                    self.b_fvg_hi = l
+                    self.b_fvg_lo = df["high"].iloc[i-2]
                     self.b_fvg_bar = i
                 if h < df["low"].iloc[i-2]:
-                    self.s_fvg_hi  = df["low"].iloc[i-2]
-                    self.s_fvg_lo  = h
+                    self.s_fvg_hi = df["low"].iloc[i-2]
+                    self.s_fvg_lo = h
                     self.s_fvg_bar = i
 
-            # OB — آخر شمعة معاكسة قبل MSS
             if mss_bull:
                 for k in range(1, 11):
                     if df["close"].iloc[i-k] < df["open"].iloc[i-k]:
@@ -164,11 +155,10 @@ class ICTStrategy:
                         self.ob_s_lo = df["low"].iloc[i-k]
                         break
 
-            # Chain
-            sweep_fresh_l = (i - self.last_ssl)  <= 25
-            sweep_fresh_s = (i - self.last_bsl)  <= 25
-            mss_fresh_l   = (i - self.last_mssb) <= 25
-            mss_fresh_s   = (i - self.last_msss) <= 25
+            sweep_fresh_l = (i - self.last_ssl) <= 25
+            sweep_fresh_s = (i - self.last_bsl) <= 25
+            mss_fresh_l = (i - self.last_mssb) <= 25
+            mss_fresh_s = (i - self.last_msss) <= 25
             chain_l = sweep_fresh_l and mss_fresh_l and self.last_mssb > self.last_ssl
             chain_s = sweep_fresh_s and mss_fresh_s and self.last_msss > self.last_bsl
 
@@ -176,9 +166,11 @@ class ICTStrategy:
             htf_bear = (not USE_HTF_BIAS) or (c < ema200)
             daily_ok = self.daily_trades < MAX_PER_DAY
 
-            # ═══════════════════════════════════════════
-            #  ❶ MMBM (Bullish Context)
-            # ═══════════════════════════════════════════
+            # ⚠️ فقط نفتح صفقات بعد cutoff_time
+            if t < cutoff_time:
+                continue
+
+            # MMBM
             if ENABLED_MODELS["MMBM"] and daily_ok and not self.trades["MMBM"]["alive"]:
                 if (i - self.trades["MMBM"]["last_bar"]) > COOLDOWN_BARS:
                     if chain_l and htf_bull and self._in_window(t, "09:30", "11:30"):
@@ -187,9 +179,7 @@ class ICTStrategy:
                                 signals.append(self._open("MMBM", True, self.ob_b_lo, i, t, c))
                                 self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❷ MMSM (Bearish Context)
-            # ═══════════════════════════════════════════
+            # MMSM
             if ENABLED_MODELS["MMSM"] and daily_ok and not self.trades["MMSM"]["alive"]:
                 if (i - self.trades["MMSM"]["last_bar"]) > COOLDOWN_BARS:
                     if chain_s and htf_bear and self._in_window(t, "09:30", "11:30"):
@@ -198,9 +188,7 @@ class ICTStrategy:
                                 signals.append(self._open("MMSM", False, self.ob_s_hi, i, t, c))
                                 self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❸ PO3/AMD
-            # ═══════════════════════════════════════════
+            # PO3
             if ENABLED_MODELS["PO3"] and daily_ok and not self.trades["PO3"]["alive"]:
                 if (i - self.trades["PO3"]["last_bar"]) > COOLDOWN_BARS:
                     if self._in_window(t, "09:30", "11:30") and not np.isnan(self.midnight_open):
@@ -211,9 +199,7 @@ class ICTStrategy:
                             signals.append(self._open("PO3", False, h, i, t, c))
                             self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❹ Judas Swing
-            # ═══════════════════════════════════════════
+            # Judas
             if ENABLED_MODELS["Judas"] and daily_ok and not self.trades["Judas"]["alive"]:
                 if (i - self.trades["Judas"]["last_bar"]) > COOLDOWN_BARS:
                     if self._in_window(t, "09:30", "09:45"):
@@ -224,9 +210,7 @@ class ICTStrategy:
                             signals.append(self._open("Judas", False, h, i, t, c))
                             self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❺ Turtle Soup
-            # ═══════════════════════════════════════════
+            # Turtle
             if ENABLED_MODELS["Turtle"] and daily_ok and not self.trades["Turtle"]["alive"]:
                 if (i - self.trades["Turtle"]["last_bar"]) > COOLDOWN_BARS:
                     if self._in_window(t, "09:30", "11:30"):
@@ -237,9 +221,7 @@ class ICTStrategy:
                             signals.append(self._open("Turtle", False, h, i, t, c))
                             self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❻ SMR
-            # ═══════════════════════════════════════════
+            # SMR
             if ENABLED_MODELS["SMR"] and daily_ok and not self.trades["SMR"]["alive"]:
                 if (i - self.trades["SMR"]["last_bar"]) > COOLDOWN_BARS:
                     if self._in_window(t, "09:30", "11:30"):
@@ -250,9 +232,7 @@ class ICTStrategy:
                             signals.append(self._open("SMR", False, self.ob_s_hi, i, t, c))
                             self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❼ TGIF Macro (الجمعة فقط)
-            # ═══════════════════════════════════════════
+            # TGIF
             if ENABLED_MODELS["TGIF"] and daily_ok and not self.trades["TGIF"]["alive"]:
                 if (i - self.trades["TGIF"]["last_bar"]) > COOLDOWN_BARS:
                     if t.weekday() == 4 and self._in_window(t, "13:30", "15:00"):
@@ -263,9 +243,7 @@ class ICTStrategy:
                             signals.append(self._open("TGIF", False, h, i, t, c))
                             self.daily_trades += 1
 
-            # ═══════════════════════════════════════════
-            #  ❽ Lunch Macro
-            # ═══════════════════════════════════════════
+            # Lunch
             if ENABLED_MODELS["Lunch"] and daily_ok and not self.trades["Lunch"]["alive"]:
                 if (i - self.trades["Lunch"]["last_bar"]) > COOLDOWN_BARS:
                     if self._in_window(t, "12:00", "13:30"):
@@ -278,8 +256,13 @@ class ICTStrategy:
 
         return signals
 
+    # ═══════════════════════════════════════════════════════
+    #  الدالة القديمة (نحتفظ بها للتوافق)
+    # ═══════════════════════════════════════════════════════
+    def process(self, df):
+        return self.process_new(df, df.index[0])
+
     def _open(self, name, is_long, sl_base, bar_idx, t, price):
-        """فتح صفقة جديدة."""
         raw_sl = abs(price - sl_base)
         clamped = max(SL_MIN_PTS, min(SL_MAX_PTS, raw_sl))
         final_sl_dist = clamped + SL_SAFETY
@@ -313,7 +296,6 @@ class ICTStrategy:
         }
 
     def update(self, df):
-        """تحديث الصفقات المفتوحة."""
         if len(df) < 2:
             return []
         last = df.iloc[-1]
@@ -336,7 +318,7 @@ class ICTStrategy:
             tr["hits"] = hits
 
             sl_hit = (l <= tr["sl"]) if tr["is_long"] else (h >= tr["sl"])
-            ended  = sl_hit or (hits >= 3)
+            ended = sl_hit or (hits >= 3)
 
             if ended:
                 tr["alive"] = False
@@ -350,3 +332,4 @@ class ICTStrategy:
                     "time": tr["time"],
                 })
         return closed
+    
