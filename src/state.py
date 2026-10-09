@@ -5,6 +5,7 @@ STATE_FILE = Path("data/state.json")
 
 
 def load_state():
+    """قراءة حالة البوت المحفوظة."""
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -14,5 +15,6 @@ def load_state():
 
 
 def save_state(state):
+    """حفظ حالة البوت."""
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2, default=str))
