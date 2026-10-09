@@ -1,2 +1,1 @@
-# ICT Trading Bot package
-__version__ = "1.0.0"
+# Config package
