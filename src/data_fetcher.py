@@ -1,20 +1,25 @@
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
-from config.settings import TWELVEDATA_API_KEY, LOOKBACK_DAYS, NY_TZ
+from config.settings import TWELVEDATA_API_KEY
 
 
-def fetch_bars(ticker="NDX", interval="5min", lookback_days=None):
-    """جلب شموع من TwelveData بتوقيت نيويورك."""
-    if lookback_days is None:
-        lookback_days = LOOKBACK_DAYS
-
-    # TwelveData يقبل outputsize بحد أقصى 5000
+def fetch_bars(ticker="NDX", interval="5min", outputsize=5000):
+    """
+    جلب شموع من TwelveData بتوقيت نيويورك.
+    
+    Args:
+        ticker: رمز الأصل (NDX, QQQ, ...)
+        interval: 1min, 5min, 15min, 1h
+        outputsize: عدد الشموع (حد أقصى 5000)
+    
+    Returns:
+        DataFrame مع الأعمدة: open, high, low, close, volume
+    """
     url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": ticker,
         "interval": interval,
-        "outputsize": 5000,
+        "outputsize": outputsize,
         "apikey": TWELVEDATA_API_KEY,
         "timezone": "America/New_York",
         "order": "ASC",
