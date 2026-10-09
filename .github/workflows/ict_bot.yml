@@ -2,10 +2,10 @@ name: ICT Trading Bot — Every 5 Min
 
 on:
   schedule:
-    # كل 5 دقائق خلال ساعات السوق (EST = UTC-5)
-    # 13:30 UTC = 08:30 EST — 21:00 UTC = 16:00 EST
+    # كل 5 دقائق خلال ساعات السوق الأمريكية
+    # UTC: 13:30-21:00 = EST: 08:30-16:00
     - cron: "*/5 13-21 * * 1-5"
-  workflow_dispatch:  # للتشغيل اليدوي
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -25,12 +25,20 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: data/state.json
+          key: ict-state-${{ github.run_id }}
+          restore-keys: |
+            ict-state-
+
       - name: Run bot once
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          POLYGON_API_KEY:    ${{ secrets.POLYGON_API_KEY }}
-          POLYGON_TICKER:     ${{ secrets.POLYGON_TICKER }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          TWELVEDATA_TICKER:  ${{ secrets.TWELVEDATA_TICKER }}
           KIT_API_KEY:        ${{ secrets.KIT_API_KEY }}
           KIT_API_SECRET:     ${{ secrets.KIT_API_SECRET }}
           KIT_BASE_URL:       ${{ secrets.KIT_BASE_URL }}
