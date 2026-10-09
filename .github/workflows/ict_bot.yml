@@ -1,0 +1,38 @@
+name: ICT Trading Bot — Every 5 Min
+
+on:
+  schedule:
+    # كل 5 دقائق خلال ساعات السوق (EST = UTC-5)
+    # 13:30 UTC = 08:30 EST — 21:00 UTC = 16:00 EST
+    - cron: "*/5 13-21 * * 1-5"
+  workflow_dispatch:  # للتشغيل اليدوي
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run bot once
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          POLYGON_API_KEY:    ${{ secrets.POLYGON_API_KEY }}
+          POLYGON_TICKER:     ${{ secrets.POLYGON_TICKER }}
+          KIT_API_KEY:        ${{ secrets.KIT_API_KEY }}
+          KIT_API_SECRET:     ${{ secrets.KIT_API_SECRET }}
+          KIT_BASE_URL:       ${{ secrets.KIT_BASE_URL }}
+          KIT_SYMBOL:         ${{ secrets.KIT_SYMBOL }}
+        run: python main.py --once
