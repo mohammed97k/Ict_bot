@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   run:
-    runs-on: windows-latest
+    runs-on: windows-2019
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,18 +23,49 @@ jobs:
         run: |
           Invoke-WebRequest "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile mt5.exe
           Start-Process .\mt5.exe -ArgumentList "/auto" -Wait
-          Start-Sleep 20
-          $exe = "C:\Program Files\MetaTrader 5\terminal64.exe"
-          if (Test-Path $exe) {
-            Write-Host "✓ MT5 installed at $exe"
+          Start-Sleep 25
+          if (Test-Path "C:\Program Files\MetaTrader 5\terminal64.exe") {
+            Write-Host "MT5 installed OK"
           } else {
-            Write-Host "✗ MT5 NOT found"
             Get-ChildItem "C:\Program Files" -Directory | Select Name
-            Get-ChildItem "C:\Program Files (x86)" -Directory | Select Name
             exit 1
           }
 
-      - name: Run
+      - name: First MT5 launch (create config)
+        shell: pwsh
+        run: |
+          Start-Process "C:\Program Files\MetaTrader 5\terminal64.exe"
+          Start-Sleep 45
+          Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 10
+          Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory | Select FullName
+
+      - name: Write credentials
+        shell: pwsh
+        env:
+          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+        run: |
+          $dirs = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory
+          foreach ($d in $dirs) {
+            $cfg = Join-Path $d.FullName "config"
+            New-Item -ItemType Directory -Force -Path $cfg | Out-Null
+            $ini = "[Common]`r`nLogin=$env:MT5_LOGIN`r`nPassword=$env:MT5_PASSWORD`r`nServer=$env:MT5_SERVER`r`nKeepPrivate=1`r`nSavePassword=1"
+            Set-Content -Path (Join-Path $cfg "common.ini") -Value $ini -Encoding ASCII
+            Write-Host "Wrote common.ini to $cfg"
+          }
+
+      - name: Launch MT5 and wait
+        shell: pwsh
+        run: |
+          Start-Process "C:\Program Files\MetaTrader 5\terminal64.exe"
+          Write-Host "Waiting 120s for login..."
+          Start-Sleep 120
+          $p = Get-Process terminal64 -ErrorAction SilentlyContinue
+          if ($p) { Write-Host "MT5 running PID: $($p.Id)" } else { Write-Host "MT5 not running"; exit 1 }
+
+      - name: Run Bot
         shell: pwsh
         env:
           MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
