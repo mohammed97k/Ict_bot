@@ -10,63 +10,73 @@ permissions:
 
 jobs:
   run:
-    runs-on: windows-2019
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Setup Linux Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install -r requirements.txt
 
-      - name: Install MT5
-        shell: pwsh
+      - name: Install system deps
         run: |
-          Invoke-WebRequest "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile mt5.exe
-          Start-Process .\mt5.exe -ArgumentList "/auto" -Wait
-          Start-Sleep 25
-          if (Test-Path "C:\Program Files\MetaTrader 5\terminal64.exe") {
-            Write-Host "MT5 installed OK"
-          } else {
-            Get-ChildItem "C:\Program Files" -Directory | Select Name
-            exit 1
-          }
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y wine64 wine32 xvfb wget
 
-      - name: First MT5 launch
-        shell: pwsh
+      - name: Download MT5 + Windows Python
         run: |
-          Start-Process "C:\Program Files\MetaTrader 5\terminal64.exe"
-          Start-Sleep 45
-          Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Sleep 10
-          Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory | Select FullName
+          wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -O mt5setup.exe
+          wget -q https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe -O python.exe
 
-      - name: Write credentials
-        shell: pwsh
-        env:
-          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
-          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
-          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+      - name: Setup Wine + Xvfb
         run: |
-          $dirs = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory
-          foreach ($d in $dirs) {
-            $cfg = Join-Path $d.FullName "config"
-            New-Item -ItemType Directory -Force -Path $cfg | Out-Null
-            $ini = "[Common]`r`nLogin=$env:MT5_LOGIN`r`nPassword=$env:MT5_PASSWORD`r`nServer=$env:MT5_SERVER`r`nKeepPrivate=1`r`nSavePassword=1"
-            Set-Content -Path (Join-Path $cfg "common.ini") -Value $ini -Encoding ASCII
-            Write-Host "Wrote common.ini to $cfg"
-          }
+          export WINEPREFIX=$HOME/.wine
+          export WINEARCH=win64
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1024x768x16 &
+          sleep 3
+          wineboot -u
+          sleep 20
 
-      - name: Launch MT5 and wait
-        shell: pwsh
+      - name: Install MT5 via Wine
         run: |
-          Start-Process "C:\Program Files\MetaTrader 5\terminal64.exe"
-          Write-Host "Waiting 120s for login..."
-          Start-Sleep 120
-          $p = Get-Process terminal64 -ErrorAction SilentlyContinue
-          if ($p) { Write-Host "MT5 running PID: $($p.Id)" } else { Write-Host "MT5 not running"; exit 1 }
+          export WINEPREFIX=$HOME/.wine
+          export DISPLAY=:99
+          wine mt5setup.exe /auto
+          sleep 90
+
+      - name: Install Windows Python via Wine
+        run: |
+          export WINEPREFIX=$HOME/.wine
+          export DISPLAY=:99
+          wine python.exe /quiet InstallAllUsers=1 PrependPath=1 Include_test=0
+          sleep 90
+          WINPY="$HOME/.wine/drive_c/users/$USER/AppData/Local/Programs/Python/Python311/python.exe"
+          if [ ! -f "$WINPY" ]; then
+            WINPY="$HOME/.wine/drive_c/Program Files/Python311/python.exe"
+          fi
+          echo "WINPY=$WINPY" >> $GITHUB_ENV
+          wine "$WINPY" -m pip install --upgrade pip
+          wine "$WINPY" -m pip install MetaTrader5 mt5linux
+
+      - name: Install Linux Python deps
+        run: pip install -r requirements.txt
+
+      - name: Start MT5 + mt5linux server
+        run: |
+          export WINEPREFIX=$HOME/.wine
+          export DISPLAY=:99
+          MT5EXE="$WINEPREFIX/drive_c/Program Files/MetaTrader 5/terminal64.exe"
+          wine "$MT5EXE" &
+          sleep 45
+          nohup wine "$WINPY" -m mt5linux --host 0.0.0.0 --port 18812 > /tmp/mt5linux.log 2>&1 &
+          sleep 25
+          cat /tmp/mt5linux.log
+          netstat -an | grep 18812 || true
 
       - name: Run Bot
-        shell: pwsh
         env:
           MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
           MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
@@ -77,9 +87,8 @@ jobs:
         run: python ict_bot.py
 
       - name: Save state
-        shell: pwsh
         run: |
           git config user.name bot
           git config user.email bot@local
           git add config.json
-          git diff --staged --quiet; if ($LASTEXITCODE -ne 0) { git commit -m "s [skip ci]"; git push }
+          git diff --staged --quiet || (git commit -m "s [skip ci]" && git push)
