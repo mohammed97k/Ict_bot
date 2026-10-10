@@ -3,7 +3,7 @@ from datetime import datetime
 import pytz
 import pandas as pd
 import numpy as np
-import MetaTrader5 as mt5
+from mt5linux import MetaTrader5 as mt5
 from telegram import Bot as TGBot
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -26,10 +26,7 @@ def save(s):
     with open(STATE, "w") as f: json.dump(s, f, indent=2, default=str)
 
 def init_mt5():
-    path = r"C:\Program Files\MetaTrader 5\terminal64.exe"
-    if not os.path.exists(path):
-        raise Exception(f"MT5 exe not found at {path}")
-    ok = mt5.initialize(path=path, timeout=300000)
+    ok = mt5.initialize(login=LOGIN, password=PWD, server=SRV, timeout=300000)
     if not ok:
         raise Exception(f"MT5 init failed: {mt5.last_error()}")
     info = mt5.account_info()
