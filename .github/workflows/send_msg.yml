@@ -14,35 +14,16 @@ jobs:
           TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
         run: |
           pip install requests
-          python3 -c "
-import os, requests
-TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
-CHAT1 = os.environ.get('TELEGRAM_CHAT_ID','')
-CHAT2 = os.environ.get('TELEGRAM_GROUP_CHAT_ID','')
-msg = '''🎉 وأخيراً بعد عناء أسبوع كامل
-گدرت أطور استراتيجية ICT تشتغل على NAS100
-بنسبة نجاح خرافية 🔥
-
-📊 ICT 7-Model NAS100
-
-▫️ MMBM: 8/6 → 75%
-▫️ MMSM: 3/2 → 66.7%
-▫️ PO3: 3/2 → 66.7%
-▫️ Judas: 3/2 → 66.7%
-▫️ SMR: 4/4 → 100%
-▫️ TGIF: 1/1 → 100%
-▫️ Lunch: 6/4 → 66.7%
-
-━━━━━━━━━━━━━━━━━━
-📈 TOTAL: 28/21 → 75% 🎯
-━━━━━━━━━━━━━━━━━━
-
-🎯 نماذج مستقلة 100%
-🚀 تعمل كل 5 دقائق على مدار الساعة
-💰 ICT Strategy — NAS100'''
-for cid in [CHAT1, CHAT2]:
-    if cid:
-        url = 'https://api.telegram.org/bot' + TOKEN + '/sendMessage'
-        r = requests.post(url, json={'chat_id': cid, 'text': msg})
-        print(cid, '->', r.json().get('ok'))
-"
+          cat > msg.py << 'PYEOF'
+          import os, requests
+          TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
+          CHAT1 = os.environ.get('TELEGRAM_CHAT_ID','')
+          CHAT2 = os.environ.get('TELEGRAM_GROUP_CHAT_ID','')
+          msg = "🎉 وأخيراً بعد عناء أسبوع كامل\nگدرت أطور استراتيجية ICT تشتغل على NAS100\nبنسبة نجاح خرافية 🔥\n\n📊 ICT 7-Model NAS100\n\n▫️ MMBM: 8/6 → 75%\n▫️ MMSM: 3/2 → 66.7%\n▫️ PO3: 3/2 → 66.7%\n▫️ Judas: 3/2 → 66.7%\n▫️ SMR: 4/4 → 100%\n▫️ TGIF: 1/1 → 100%\n▫️ Lunch: 6/4 → 66.7%\n\n━━━━━━━━━━━━━━\n📈 TOTAL: 28/21 → 75% 🎯\n━━━━━━━━━━━━━━\n\n🎯 نماذج مستقلة 100%\n🚀 تعمل كل 5 دقائق\n💰 ICT Strategy — NAS100"
+          for cid in [CHAT1, CHAT2]:
+              if cid:
+                  url = 'https://api.telegram.org/bot' + TOKEN + '/sendMessage'
+                  r = requests.post(url, json={'chat_id': cid, 'text': msg})
+                  print(cid, '->', r.json().get('ok'))
+          PYEOF
+          python3 msg.py
