@@ -26,9 +26,23 @@ def save(s):
     with open(STATE, "w") as f: json.dump(s, f, indent=2, default=str)
 
 def init_mt5():
-    if not mt5.initialize(login=LOGIN, password=PWD, server=SRV):
+    path = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+    if not os.path.exists(path):
+        raise Exception(f"MT5 exe not found at {path}")
+    ok = mt5.initialize(
+        path=path,
+        login=LOGIN,
+        password=PWD,
+        server=SRV,
+        timeout=180000,
+        portable=False
+    )
+    if not ok:
         raise Exception(f"MT5 init failed: {mt5.last_error()}")
-    print(f"[MT5 OK] {mt5.account_info().login} @ {mt5.account_info().server}")
+    info = mt5.account_info()
+    if info is None:
+        raise Exception("MT5 connected but no account info")
+    print(f"[MT5 OK] {info.login} @ {info.server}")
 
 def fetch():
     r = mt5.copy_rates_from_pos(SYM, mt5.TIMEFRAME_M5, 0, 600)
@@ -58,7 +72,7 @@ class Bot:
                      "obBHi": None, "obBLo": None, "obSHi": None, "obSLo": None,
                      "mo": None, "day": None, "dt": 0, "act": {}, "mli": {}}.items():
             self.s.setdefault(k, v)
-        self.tg = Bot(token=TOKEN)
+        self.tg = Bot.__bases__[0](token=TOKEN) if False else __import__("telegram").Bot(token=TOKEN)
 
     def send(self, m):
         try:
