@@ -29,14 +29,7 @@ def init_mt5():
     path = r"C:\Program Files\MetaTrader 5\terminal64.exe"
     if not os.path.exists(path):
         raise Exception(f"MT5 exe not found at {path}")
-    ok = mt5.initialize(
-        path=path,
-        login=LOGIN,
-        password=PWD,
-        server=SRV,
-        timeout=180000,
-        portable=False
-    )
+    ok = mt5.initialize(path=path, timeout=300000)
     if not ok:
         raise Exception(f"MT5 init failed: {mt5.last_error()}")
     info = mt5.account_info()
