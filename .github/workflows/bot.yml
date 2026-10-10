@@ -17,25 +17,46 @@ jobs:
         with:
           python-version: '3.11'
       - run: pip install -r requirements.txt
-      - name: Setup MT5
+
+      - name: Download & Install MT5
         shell: pwsh
         run: |
           Invoke-WebRequest "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile mt5.exe
-          Write-Host "Downloaded. Installing..."
           Start-Process .\mt5.exe -ArgumentList "/auto" -Wait
           Start-Sleep 30
-          $mt5exe = "C:\Program Files\MetaTrader 5\terminal64.exe"
-          if (Test-Path $mt5exe) {
-            Write-Host "MT5 found. Launching..."
-            Start-Process $mt5exe
-            Start-Sleep 20
-            Write-Host "MT5 running."
-          } else {
-            Write-Host "MT5 not found at expected path."
-            Get-ChildItem "C:\Program Files" -Directory | Select-Object Name
-            Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory -ErrorAction SilentlyContinue | Select-Object FullName
-            exit 1
-          }
+
+      - name: Configure MT5 Auto-Login
+        shell: pwsh
+        env:
+          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+        run: |
+          $termDir = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $termDir) { Write-Host "No terminal dir"; exit 1 }
+          $cfgDir = Join-Path $termDir.FullName "config"
+          New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+          $commonIni = @"
+          [Common]
+          Login=$env:MT5_LOGIN
+          Password=$env:MT5_PASSWORD
+          Server=$env:MT5_SERVER
+          KeepPrivate=1
+          EnableNews=0
+          SavePassword=1
+          "@
+          $commonIni | Out-File -FilePath (Join-Path $cfgDir "common.ini") -Encoding ASCII -Force
+          Write-Host "common.ini written to $cfgDir"
+
+      - name: Launch MT5
+        shell: pwsh
+        run: |
+          $mt5 = "C:\Program Files\MetaTrader 5\terminal64.exe"
+          if (-not (Test-Path $mt5)) { Write-Host "MT5 exe missing"; exit 1 }
+          Start-Process $mt5
+          Write-Host "Waiting 90s for MT5 to login..."
+          Start-Sleep 90
+
       - name: Run
         shell: pwsh
         env:
@@ -46,6 +67,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python ict_bot.py
+
       - name: Save state
         shell: pwsh
         run: |
