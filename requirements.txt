@@ -1,5 +1,4 @@
-mt5linux
 pandas
 numpy
-python-telegram-bot
+requests
 pytz
