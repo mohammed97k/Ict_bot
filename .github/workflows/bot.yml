@@ -1,94 +1,52 @@
-name: ICT Bot
+name: NAS100 Signals Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/5 * * * 1-5'
   workflow_dispatch:
+
+concurrency:
+  group: nas100-bot
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  run:
+  run-strategy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup Linux Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.10'
 
-      - name: Install system deps
+      - name: Install dependencies
         run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y wine64 wine32 xvfb wget
+          pip install pandas numpy requests pytz
 
-      - name: Download MT5 + Windows Python
-        run: |
-          wget -q https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe -O mt5setup.exe
-          wget -q https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe -O python.exe
-
-      - name: Setup Wine + Xvfb
-        run: |
-          export WINEPREFIX=$HOME/.wine
-          export WINEARCH=win64
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1024x768x16 &
-          sleep 3
-          wineboot -u
-          sleep 20
-
-      - name: Install MT5 via Wine
-        run: |
-          export WINEPREFIX=$HOME/.wine
-          export DISPLAY=:99
-          wine mt5setup.exe /auto
-          sleep 90
-
-      - name: Install Windows Python via Wine
-        run: |
-          export WINEPREFIX=$HOME/.wine
-          export DISPLAY=:99
-          wine python.exe /quiet InstallAllUsers=1 PrependPath=1 Include_test=0
-          sleep 90
-          WINPY="$HOME/.wine/drive_c/users/$USER/AppData/Local/Programs/Python/Python311/python.exe"
-          if [ ! -f "$WINPY" ]; then
-            WINPY="$HOME/.wine/drive_c/Program Files/Python311/python.exe"
-          fi
-          echo "WINPY=$WINPY" >> $GITHUB_ENV
-          wine "$WINPY" -m pip install --upgrade pip
-          wine "$WINPY" -m pip install MetaTrader5 mt5linux
-
-      - name: Install Linux Python deps
-        run: pip install -r requirements.txt
-
-      - name: Start MT5 + mt5linux server
-        run: |
-          export WINEPREFIX=$HOME/.wine
-          export DISPLAY=:99
-          MT5EXE="$WINEPREFIX/drive_c/Program Files/MetaTrader 5/terminal64.exe"
-          wine "$MT5EXE" &
-          sleep 45
-          nohup wine "$WINPY" -m mt5linux --host 0.0.0.0 --port 18812 > /tmp/mt5linux.log 2>&1 &
-          sleep 25
-          cat /tmp/mt5linux.log
-          netstat -an | grep 18812 || true
-
-      - name: Run Bot
+      - name: Run Strategy Bot
         env:
-          MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
-          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
-          MT5_SERVER: ${{ secrets.MT5_SERVER }}
-          MT5_SYMBOL: ${{ secrets.MT5_SYMBOL }}
+          TICKERALL_API_KEY: ${{ secrets.TICKERALL_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python ict_bot.py
+          TELEGRAM_GROUP_CHAT_ID: ${{ secrets.TELEGRAM_GROUP_CHAT_ID }}
+          MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+          MT5_SERVER: ${{ secrets.MT5_SERVER }}
+          MT5_ACCOUNT: ${{ secrets.MT5_ACCOUNT }}
+        run: python -u bot.py
 
-      - name: Save state
+      - name: Commit state file
         run: |
-          git config user.name bot
-          git config user.email bot@local
-          git add config.json
-          git diff --staged --quiet || (git commit -m "s [skip ci]" && git push)
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add state.json || true
+          git diff --staged --quiet || git commit -m "Update state [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && break || sleep 5
+          done
