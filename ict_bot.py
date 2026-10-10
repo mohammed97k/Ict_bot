@@ -1,235 +1,475 @@
-import os, json, asyncio
-from datetime import datetime
-import pytz
+import os
+import json
+import time
+import requests
 import pandas as pd
 import numpy as np
-from mt5linux import MetaTrader5
-from telegram import Bot as TGBot
+import traceback
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT  = os.environ["TELEGRAM_CHAT_ID"]
-LOGIN = int(os.environ["MT5_LOGIN"])
-PWD   = os.environ["MT5_PASSWORD"]
-SRV   = os.environ["MT5_SERVER"]
-SYM   = os.environ.get("MT5_SYMBOL", "NDXUSD#")
+TICKERALL_API_KEY = os.environ.get("TICKERALL_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+TELEGRAM_GROUP_CHAT_ID = os.environ.get("TELEGRAM_GROUP_CHAT_ID")
+MT5_PASSWORD = os.environ.get("MT5_PASSWORD")
+MT5_SERVER = os.environ.get("MT5_SERVER")
+MT5_ACCOUNT = os.environ.get("MT5_ACCOUNT")
 
-MOSUL = pytz.timezone("Asia/Baghdad")
-NY    = pytz.timezone("America/New_York")
-STATE = "config.json"
+STATE_FILE = "state.json"
+NY_TZ = ZoneInfo("America/New_York")
+MOSUL_TZ = ZoneInfo("Asia/Baghdad")
+BASE_URL = "https://api.tickerall.com"
+SERVER_OFFSET_HOURS = 3
+ALERT_COOLDOWN_MINUTES = 60
 
-def load():
-    if os.path.exists(STATE):
-        with open(STATE) as f: return json.load(f)
-    return {}
+MULT = 1.0
+ATR_PERIOD = 14
+MIN_SL_PTS = 50.0
+MAX_SL_PTS = 180.0
+COOLDOWN_NORMAL = 20
+COOLDOWN_STRONG = 5
+MAX_TRADES_PER_DAY = 3
+MAX_BARS_TRADE = 60
+TP1_R = 1.0
+TP2_R = 2.0
+TP3_R = 3.0
+SYMBOL = "NDXUSD#"
+PIVOT_LEFT = 4
+PIVOT_RIGHT = 4
+SWEEP_LB = 20
+FVG_EXPIRY = 15
+OB_EXPIRY = 15
+MSS_EXPIRY = 25
+SWEEP_EXPIRY = 25
+STALE_DATA_MINUTES = 240
 
-def save(s):
-    with open(STATE, "w") as f: json.dump(s, f, indent=2, default=str)
 
-def init_mt5():
-    mt5 = MetaTrader5(host="localhost", port=18812)
-    if not mt5.initialize():
-        raise Exception(f"MT5 init failed: {mt5.last_error()}")
-    info = mt5.account_info()
-    if info is None:
-        raise Exception("MT5 connected but no account info")
-    print(f"[MT5 OK] {info.login} @ {info.server}")
-    return mt5
+def fmt_mosul(dt_utc):
+    return dt_utc.astimezone(MOSUL_TZ).strftime('%I:%M %p')
 
-def fetch(mt5):
-    r = mt5.copy_rates_from_pos(SYM, mt5.TIMEFRAME_M5, 0, 600)
-    if r is None or len(r) == 0:
-        raise Exception(f"No data for {SYM}")
-    df = pd.DataFrame(r)
-    df["dt"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.tz_convert(NY)
-    return df[["dt", "open", "high", "low", "close"]]
 
-def ind(df):
-    h, l, c = df["high"], df["low"], df["close"]
-    tr = pd.concat([h-l, (h-c.shift()).abs(), (l-c.shift()).abs()], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(alpha=1/14, adjust=False).mean()
-    df["ema"] = c.ewm(span=200, adjust=False).mean()
-    df["disp"] = (h - l) > 1.3 * df["atr"]
-    df["ph"] = np.nan
-    df["pl"] = np.nan
-    for i in range(4, len(df)-4):
-        if h.iloc[i] == h.iloc[i-4:i+5].max(): df.at[i, "ph"] = h.iloc[i]
-        if l.iloc[i] == l.iloc[i-4:i+5].min(): df.at[i, "pl"] = l.iloc[i]
-    return df
-
-class Bot:
-    def __init__(self):
-        self.s = load()
-        for k, v in {"lb": None, "lPH": None, "lPL": None,
-                     "obBHi": None, "obBLo": None, "obSHi": None, "obSLo": None,
-                     "mo": None, "day": None, "dt": 0, "act": {}, "mli": {}}.items():
-            self.s.setdefault(k, v)
-        self.tg = TGBot(token=TOKEN)
-
-    def send(self, m):
+def send_telegram(message):
+    chat_ids = [c for c in [TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID] if c]
+    for chat_id in chat_ids:
+        url = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
         try:
-            asyncio.run(self.tg.send_message(chat_id=CHAT, text=m))
-            print(f"[TG] {m[:50]}")
+            r = requests.post(url, json={"chat_id": chat_id, "text": message}, timeout=15)
+            print("TG->" + str(chat_id) + ": ok=" + str(r.json().get('ok')))
         except Exception as e:
-            print(f"[TG ERR] {e}")
+            print("TG Error: " + str(e))
 
-    def now(self):
-        return datetime.now(MOSUL).strftime("%I:%M %p").lstrip("0")
 
-    def sig(self, s):
-        ic = "🟢 BUY" if s["is_long"] else "🔴 SELL"
-        return (f"{ic} [{s['model']}]\n"
-                f"Entry: {s['entry']:.2f}\n"
-                f"SL: {s['sl']:.2f}\n"
-                f"🎯 TP1: {s['tp1']:.2f}\n"
-                f"🎯 🎯 TP2: {s['tp2']:.2f}\n"
-                f"🎯 🎯 🎯 TP3: {s['tp3']:.2f}\n"
-                f"Points: {s['pts']:.2f}\n"
-                f"🕐 {self.now()}")
-
-    def hit(self, a):
-        if a["type"] == "SL":
-            return f"🛑 SL HIT [{a['model']}]\nPrice: {a['price']:.2f}\n🕐 {self.now()}"
-        e = {"TP1": "🎯", "TP2": "🎯 🎯", "TP3": "🎯 🎯 🎯"}[a["type"]]
-        return (f"✅ {a['type']} HIT [{a['model']}] {e}\n"
-                f"Price: {a['price']:.2f}\n"
-                f"Points: {a['pts']:.2f}\n"
-                f"🕐 {self.now()}")
-
-    def check_hits(self, bar):
-        for m, t in list(self.s["act"].items()):
-            il = t["is_long"]
-            if il:
-                slh = bar["low"]  <= t["sl"];  t1 = bar["high"] >= t["tp1"]
-                t2  = bar["high"] >= t["tp2"]; t3 = bar["high"] >= t["tp3"]
+def open_session(max_retries=3):
+    url = BASE_URL + "/v1/sessions"
+    headers = {"Authorization": "Bearer " + TICKERALL_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "broker": "mt5",
+        "server": MT5_SERVER,
+        "account": int(MT5_ACCOUNT) if MT5_ACCOUNT and MT5_ACCOUNT.isdigit() else MT5_ACCOUNT,
+        "password": MT5_PASSWORD
+    }
+    for attempt in range(1, max_retries + 1):
+        try:
+            print("Session attempt " + str(attempt) + "/" + str(max_retries))
+            r = requests.post(url, headers=headers, json=payload, timeout=30)
+            if r.status_code == 200:
+                account_id = r.json().get("accountId")
+                print("Session opened: " + str(account_id))
+                return account_id
             else:
-                slh = bar["high"] >= t["sl"];  t1 = bar["low"]  <= t["tp1"]
-                t2  = bar["low"]  <= t["tp2"]; t3 = bar["low"]  <= t["tp3"]
-            if slh and not t["tp1_hit"]:
-                self.send(self.hit({"model": m, "type": "SL", "price": t["sl"]}))
-                del self.s["act"][m]; continue
-            if t1 and not t["tp1_hit"]:
+                print("Session failed: " + str(r.status_code) + " " + r.text[:200])
+                if attempt < max_retries:
+                    time.sleep(5)
+        except Exception as e:
+            print("Session error: " + str(e))
+            if attempt < max_retries:
+                time.sleep(5)
+    print("All session attempts failed")
+    return None
+
+
+def fetch_candles(account_id, symbol, timeframe, limit=500, hours=500, server_offset_hours=SERVER_OFFSET_HOURS):
+    url = BASE_URL + "/v1/accounts/" + account_id + "/candles"
+    headers = {"Authorization": "Bearer " + TICKERALL_API_KEY}
+    params = {"symbol": symbol, "timeframe": timeframe, "limit": limit, "hours": hours}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=90)
+        if r.status_code != 200:
+            print("Fail " + timeframe + ": " + str(r.status_code))
+            return None
+        data = r.json()
+        candles = data.get("candles", [])
+        if not candles:
+            print("No candles for " + timeframe)
+            return None
+        df = pd.DataFrame(candles)
+        df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True) - pd.Timedelta(hours=server_offset_hours)
+        df = df[["datetime", "open", "high", "low", "close"]].copy()
+        for c in ["open", "high", "low", "close"]:
+            df[c] = pd.to_numeric(df[c])
+        df = df.sort_values("datetime").reset_index(drop=True)
+        print("OK " + timeframe + ": " + str(len(df)) + " candles | last: " + str(df.iloc[-1]['close']))
+        return df
+    except Exception as e:
+        print("Fetch " + timeframe + " Error: " + str(e))
+        traceback.print_exc()
+        return None
+
+
+def ta_atr(df, period=14):
+    high = df["high"]; low = df["low"]; close = df["close"]
+    tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1.0/period, adjust=False).mean()
+
+
+def ta_ema(series, length):
+    return series.ewm(span=length, adjust=False).mean()
+
+
+def ta_pivothigh(highs, left, right):
+    n = len(highs); result = np.full(n, np.nan)
+    for i in range(left, n - right):
+        window = highs[i-left:i+right+1]
+        if highs[i] == window.max() and (window == highs[i]).sum() == 1:
+            result[i + right] = highs[i]
+    return result
+
+
+def ta_pivotlow(lows, left, right):
+    n = len(lows); result = np.full(n, np.nan)
+    for i in range(left, n - right):
+        window = lows[i-left:i+right+1]
+        if lows[i] == window.min() and (window == lows[i]).sum() == 1:
+            result[i + right] = lows[i]
+    return result
+
+
+def ta_lowest(series, length):
+    return series.rolling(length).min()
+
+
+def ta_highest(series, length):
+    return series.rolling(length).max()
+
+
+def tm(dt, h1, m1, h2, m2):
+    t = dt.hour * 60 + dt.minute
+    return (h1 * 60 + m1) <= t < (h2 * 60 + m2)
+
+
+def session_flags(dt):
+    return {
+        "Judas":  tm(dt, 9, 30, 9, 45),
+        "AM":     tm(dt, 9, 30, 11, 30),
+        "Lunch":  tm(dt, 12, 0, 13, 30),
+        "PM":     tm(dt, 13, 30, 15, 0),
+        "TGIF":   (dt.weekday() == 4) and tm(dt, 13, 30, 15, 0),
+    }
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as f:
+            s = json.load(f)
+            active = s.get('active_trade')
+            print("State: active_trade=" + ("YES" if active else "NO") + " | trades_today=" + str(s.get('trade_count_today', 0)))
+            return s
+    print("State new")
+    return {"active_trade": None, "last_entry_time": None, "trade_count_today": 0, "last_day": None, "models_done_today": [], "last_session_alert": None}
+
+
+def save_state(s):
+    with open(STATE_FILE, "w") as f:
+        json.dump(s, f, indent=2)
+    print("State saved")
+
+
+def manage_trade(state, df5, now_utc):
+    t = state["active_trade"]
+    if t is None:
+        return
+    d = t["direction"]; e = t["entry"]
+    tp1 = t["tp1"]; tp2 = t["tp2"]; tp3 = t["tp3"]
+    entry_time_str = t.get("entry_time")
+    if not entry_time_str:
+        return
+    entry_dt = datetime.fromisoformat(entry_time_str)
+    entry_dt_adjusted = entry_dt - pd.Timedelta(hours=SERVER_OFFSET_HOURS)
+    elapsed = (now_utc - entry_dt).total_seconds()
+    bars_elapsed = elapsed / 300
+    if bars_elapsed >= MAX_BARS_TRADE:
+        state["active_trade"] = None
+        send_telegram("Time Exit (60 bars)\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nTime: " + fmt_mosul(now_utc))
+        return
+    bars_since = df5[df5["datetime"] >= entry_dt_adjusted].copy()
+    if len(bars_since) == 0:
+        return
+    for idx, row in bars_since.iterrows():
+        bh = float(row["high"]); bl = float(row["low"]); bt = row["datetime"]
+        current_sl = t["sl"]
+        sl_hit = False
+        if d == "BUY":
+            if bl <= current_sl: sl_hit = True
+        else:
+            if bh >= current_sl: sl_hit = True
+        if sl_hit:
+            if t["tp1_hit"]:
+                send_telegram("SL after TP1 (BE)\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nSL: " + str(current_sl) + "\nTime: " + fmt_mosul(bt))
+            else:
+                send_telegram("SL hit!\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nSL: " + str(current_sl) + "\nTime: " + fmt_mosul(bt))
+            state["active_trade"] = None
+            return
+        if not t["tp1_hit"]:
+            hit = (d == "BUY" and bh >= tp1) or (d == "SELL" and bl <= tp1)
+            if hit:
                 t["tp1_hit"] = True
-                self.send(self.hit({"model": m, "type": "TP1", "price": t["tp1"], "pts": abs(t["tp1"]-t["entry"])}))
-            if t2 and not t["tp2_hit"]:
+                t["sl"] = e
+                send_telegram("TP1 hit!\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nTP1: " + str(tp1) + "\nMove SL to BE: " + str(e) + "\nTime: " + fmt_mosul(bt))
+        if t["tp1_hit"] and not t["tp2_hit"]:
+            hit = (d == "BUY" and bh >= tp2) or (d == "SELL" and bl <= tp2)
+            if hit:
                 t["tp2_hit"] = True
-                self.send(self.hit({"model": m, "type": "TP2", "price": t["tp2"], "pts": abs(t["tp2"]-t["entry"])}))
-            if t3 and not t["tp3_hit"]:
+                send_telegram("TP2 hit!\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nTP2: " + str(tp2) + "\nTime: " + fmt_mosul(bt))
+        if t["tp2_hit"] and not t["tp3_hit"]:
+            hit = (d == "BUY" and bh >= tp3) or (d == "SELL" and bl <= tp3)
+            if hit:
                 t["tp3_hit"] = True
-                self.send(self.hit({"model": m, "type": "TP3", "price": t["tp3"], "pts": abs(t["tp3"]-t["entry"])}))
-                del self.s["act"][m]
+                send_telegram("TP3 hit!\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nTP3: " + str(tp3) + "\nTime: " + fmt_mosul(bt))
+                state["active_trade"] = None
+                return
 
-    def fire(self, model, il, e, slb, idx):
-        if self.s["dt"] >= 3: return None
-        last = self.s["mli"].get(model)
-        if last and (idx - last) < 20: return None
-        if model in self.s["act"]: return None
-        raw = abs(e - slb)
-        cl = max(50.0, min(180.0, raw))
-        fsl = cl + 20.0
-        slv = e - fsl if il else e + fsl
-        tp1 = e + max(80.0, fsl) if il else e - max(80.0, fsl)
-        tp2 = e + max(120.0, 2.0*fsl) if il else e - max(120.0, 2.0*fsl)
-        tp3 = e + max(160.0, 3.0*fsl) if il else e - max(160.0, 3.0*fsl)
-        pts = abs(tp1 - e)
-        self.s["act"][model] = {"entry": e, "sl": slv, "tp1": tp1, "tp2": tp2, "tp3": tp3,
-                                "is_long": il, "pts": pts,
-                                "tp1_hit": False, "tp2_hit": False, "tp3_hit": False}
-        self.s["mli"][model] = idx
-        self.s["dt"] += 1
-        return {"model": model, "entry": e, "sl": slv, "tp1": tp1,
-                "tp2": tp2, "tp3": tp3, "is_long": il, "pts": pts}
 
-    def run(self, df):
-        df = ind(df)
-        bar = df.iloc[-2]
-        key = str(bar["dt"])
-        if self.s["lb"] == key:
-            print("[SKIP]"); return
-        self.s["lb"] = key
-        t = bar["dt"]
-        hm = t.hour*100 + t.minute
-        am    = 930 <= hm < 1130
-        judas = 930 <= hm < 945
-        lunch = 1200 <= hm < 1330
-        pm    = 1330 <= hm < 1500
-        fri   = t.weekday() == 4
-        if 0 <= hm < 5: self.s["mo"] = float(bar["open"])
-        today = str(t.date())
-        if self.s["day"] != today:
-            self.s["day"] = today; self.s["dt"] = 0; self.s["act"] = {}
-        ph = df["ph"].dropna(); pl = df["pl"].dropna()
-        if len(ph): self.s["lPH"] = float(ph.iloc[-1])
-        if len(pl): self.s["lPL"] = float(pl.iloc[-1])
-        lPH = self.s["lPH"]; lPL = self.s["lPL"]
-        if lPH and bar["close"] > lPH and bar["disp"]:
-            for i in range(2, 12):
-                r = df.iloc[-i]
-                if r["close"] < r["open"]:
-                    self.s["obBHi"] = float(r["high"]); self.s["obBLo"] = float(r["low"]); break
-        if lPL and bar["close"] < lPL and bar["disp"]:
-            for i in range(2, 12):
-                r = df.iloc[-i]
-                if r["close"] > r["open"]:
-                    self.s["obSHi"] = float(r["high"]); self.s["obSLo"] = float(r["low"]); break
-        self.check_hits(bar)
-        mid = self.s["mo"]
-        bbh = self.s["obBHi"]; bbl = self.s["obBLo"]
-        bsh = self.s["obSHi"]; bsl = self.s["obSLo"]
-        ix = len(df)
-        sg = []
-        if mid and bar["close"] > bar["ema"] and am and bar["close"] > mid and bbh and bar["low"] <= bbh and bar["close"] > bbl:
-            r = self.fire("MMBM", True, float(bar["close"]), bbl or lPL, ix)
-            if r: sg.append(r)
-        if mid and bar["close"] < bar["ema"] and am and bar["close"] < mid and bsl and bar["high"] >= bsl and bar["close"] < bsh:
-            r = self.fire("MMSM", False, float(bar["close"]), bsh or lPH, ix)
-            if r: sg.append(r)
-        if am and mid and bar["low"] < mid and bar["close"] > mid:
-            r = self.fire("PO3", True, float(bar["close"]), bbl or lPL, ix)
-            if r: sg.append(r)
-        if am and mid and bar["high"] > mid and bar["close"] < mid:
-            r = self.fire("PO3", False, float(bar["close"]), bsh or lPH, ix)
-            if r: sg.append(r)
-        if judas:
-            rg = bar["high"] - bar["low"]
-            su = rg > 0 and (bar["close"] - bar["low"])/rg >= 0.70
-            sd = rg > 0 and (bar["high"] - bar["close"])/rg >= 0.70
-            if bar["disp"] and bar["close"] > bar["ema"] and mid and bar["close"] > mid and su:
-                r = self.fire("Judas", True, float(bar["close"]), bbl or lPL, ix)
-                if r: sg.append(r)
-            if bar["disp"] and bar["close"] < bar["ema"] and mid and bar["close"] < mid and sd:
-                r = self.fire("Judas", False, float(bar["close"]), bsh or lPH, ix)
-                if r: sg.append(r)
-        if am and bbh and bar["low"] <= bbh and bar["close"] > bbl:
-            r = self.fire("SMR", True, float(bar["close"]), bbl or lPL, ix)
-            if r: sg.append(r)
-        if am and bsl and bar["high"] >= bsl and bar["close"] < bsh:
-            r = self.fire("SMR", False, float(bar["close"]), bsh or lPH, ix)
-            if r: sg.append(r)
-        if fri and pm and bar["disp"]:
-            if mid and bar["close"] > mid:
-                r = self.fire("TGIF", True, float(bar["close"]), bbl or lPL, ix)
-                if r: sg.append(r)
-            if mid and bar["close"] < mid:
-                r = self.fire("TGIF", False, float(bar["close"]), bsh or lPH, ix)
-                if r: sg.append(r)
-        if lunch and bbh and bar["close"] > bbh:
-            r = self.fire("Lunch", True, float(bar["close"]), bbl or lPL, ix)
-            if r: sg.append(r)
-        if lunch and bsl and bar["close"] < bsl:
-            r = self.fire("Lunch", False, float(bar["close"]), bsh or lPH, ix)
-            if r: sg.append(r)
-        for s in sg:
-            self.send(self.sig(s))
-        save(self.s)
+def build_context(df):
+    n = len(df)
+    atr = ta_atr(df, ATR_PERIOD).values
+    sh = ta_pivothigh(df["high"].values, PIVOT_LEFT, PIVOT_RIGHT)
+    sl = ta_pivotlow(df["low"].values, PIVOT_LEFT, PIVOT_RIGHT)
+    last_sh = np.full(n, np.nan); last_sl = np.full(n, np.nan)
+    cur_sh = np.nan; cur_sl = np.nan
+    for i in range(n):
+        if not np.isnan(sh[i]): cur_sh = sh[i]
+        if not np.isnan(sl[i]): cur_sl = sl[i]
+        last_sh[i] = cur_sh; last_sl[i] = cur_sl
+    low_a = df["low"].values; high_a = df["high"].values; close_a = df["close"].values
+    open_a = df["open"].values
+    recent_low = ta_lowest(df["low"], SWEEP_LB).shift(1).values
+    recent_high = ta_highest(df["high"], SWEEP_LB).shift(1).values
+    bull_sweep = (low_a < recent_low) & (close_a > recent_low)
+    bear_sweep = (high_a > recent_high) & (close_a < recent_high)
+    bull_sweep_ok = np.zeros(n, dtype=bool); bull_sweep_low = np.full(n, np.nan)
+    bear_sweep_ok = np.zeros(n, dtype=bool); bear_sweep_high = np.full(n, np.nan)
+    cbok = False; cbbr = -1; cbbl = np.nan
+    cek = False; cebr = -1; cebh = np.nan
+    for i in range(n):
+        if bull_sweep[i]:
+            cbok = True; cbbr = i; cbbl = low_a[i]
+        if bear_sweep[i]:
+            cek = True; cebr = i; cebh = high_a[i]
+        if cbok and (i - cbbr) > SWEEP_EXPIRY: cbok = False
+        if cek and (i - cebr) > SWEEP_EXPIRY: cek = False
+        bull_sweep_ok[i] = cbok; bull_sweep_low[i] = cbbl
+        bear_sweep_ok[i] = cek; bear_sweep_high[i] = cebh
+    bull_mss = np.zeros(n, dtype=bool); bear_mss = np.zeros(n, dtype=bool)
+    cbm = False; cbmbar = -1; csm = False; csmbar = -1
+    for i in range(1, n):
+        if not np.isnan(last_sh[i]) and close_a[i] > last_sh[i] and close_a[i-1] <= last_sh[i] and bull_sweep_ok[i]:
+            cbm = True; cbmbar = i
+        if not np.isnan(last_sl[i]) and close_a[i] < last_sl[i] and close_a[i-1] >= last_sl[i] and bear_sweep_ok[i]:
+            csm = True; csmbar = i
+        if cbm and (i - cbmbar) > MSS_EXPIRY: cbm = False
+        if csm and (i - csmbar) > MSS_EXPIRY: csm = False
+        bull_mss[i] = cbm; bear_mss[i] = csm
+    bOBHigh = np.full(n, np.nan); bOBLow = np.full(n, np.nan); bOBMT = np.full(n, np.nan); bOBActive = np.zeros(n, dtype=bool)
+    sOBHigh = np.full(n, np.nan); sOBLow = np.full(n, np.nan); sOBMT = np.full(n, np.nan); sOBActive = np.zeros(n, dtype=bool)
+    cboH = np.nan; cboL = np.nan; cboMT = np.nan; cboBar = -1; cboAct = False
+    csoH = np.nan; csoL = np.nan; csoMT = np.nan; csoBar = -1; csoAct = False
+    for i in range(1, n):
+        if close_a[i] > open_a[i] and close_a[i-1] < open_a[i-1]:
+            cboH = high_a[i-1]; cboL = low_a[i-1]; cboMT = (open_a[i-1] + close_a[i-1]) / 2.0; cboBar = i-1; cboAct = True
+        if close_a[i] < open_a[i] and close_a[i-1] > open_a[i-1]:
+            csoH = high_a[i-1]; csoL = low_a[i-1]; csoMT = (open_a[i-1] + close_a[i-1]) / 2.0; csoBar = i-1; csoAct = True
+        if cboAct and (i - cboBar) > OB_EXPIRY: cboAct = False
+        if csoAct and (i - csoBar) > OB_EXPIRY: csoAct = False
+        bOBHigh[i] = cboH; bOBLow[i] = cboL; bOBMT[i] = cboMT; bOBActive[i] = cboAct
+        sOBHigh[i] = csoH; sOBLow[i] = csoL; sOBMT[i] = csoMT; sOBActive[i] = csoAct
+    midnightOpen = np.full(n, np.nan)
+    df_ny = df["datetime"].dt.tz_convert(NY_TZ)
+    cur_mo = np.nan
+    for i in range(n):
+        dt_ny = df_ny.iloc[i]
+        if dt_ny.hour == 0 and dt_ny.minute == 0:
+            cur_mo = open_a[i]
+        midnightOpen[i] = cur_mo
+    return {
+        "atr": atr, "last_sh": last_sh, "last_sl": last_sl,
+        "bull_sweep_ok": bull_sweep_ok, "bear_sweep_ok": bear_sweep_ok,
+        "bull_sweep_low": bull_sweep_low, "bear_sweep_high": bear_sweep_high,
+        "bull_mss": bull_mss, "bear_mss": bear_mss,
+        "bOBHigh": bOBHigh, "bOBLow": bOBLow, "bOBMT": bOBMT, "bOBActive": bOBActive,
+        "sOBHigh": sOBHigh, "sOBLow": sOBLow, "sOBMT": sOBMT, "sOBActive": sOBActive,
+        "midnightOpen": midnightOpen,
+    }
+
+
+def check_signal(df5, df1h, state, now_utc, now_ny):
+    try:
+        ctx = build_context(df5)
+        i = len(df5) - 1
+        atr = ctx["atr"][i]
+        if np.isnan(atr): return None
+        df1h = df1h.copy()
+        df1h["ema200"] = ta_ema(df1h["close"], 200)
+        h1 = df1h.iloc[-2]
+        trend_up = h1["close"] > h1["ema200"] if not pd.isna(h1["ema200"]) else False
+        trend_down = h1["close"] < h1["ema200"] if not pd.isna(h1["ema200"]) else False
+        print("H1 trend: " + ("UP" if trend_up else "DOWN" if trend_down else "NONE"))
+        sessions = session_flags(now_ny)
+        close = df5["close"].iloc[i]
+        low = df5["low"].iloc[i]
+        high = df5["high"].iloc[i]
+        opn = df5["open"].iloc[i]
+        rng = high - low
+        strong_up = rng > 0 and (close - low) / rng >= 0.70
+        strong_dn = rng > 0 and (high - close) / rng >= 0.70
+        midnight = ctx["midnightOpen"][i]
+        bbh = ctx["bOBHigh"][i]; bbl = ctx["bOBLow"][i]
+        bsh = ctx["sOBHigh"][i]; bsl = ctx["sOBLow"][i]
+        chainL = ctx["bull_sweep_ok"][i] and ctx["bull_mss"][i]
+        chainS = ctx["bear_sweep_ok"][i] and ctx["bear_mss"][i]
+        if state["trade_count_today"] >= MAX_TRADES_PER_DAY:
+            return None
+        if state["last_entry_time"]:
+            last_dt = datetime.fromisoformat(state["last_entry_time"])
+            bars_since = int((now_utc - last_dt).total_seconds() / 300)
+            if bars_since <= COOLDOWN_NORMAL:
+                return None
+        sigL = False; sigS = False; model = None
+        if sessions["AM"] and chainL and close > h1["ema200"] and not np.isnan(midnight) and close > midnight and not np.isnan(bbh) and low <= bbh and close > bbl:
+            sigL = True; model = "MMBM"
+        elif sessions["AM"] and chainS and close < h1["ema200"] and not np.isnan(midnight) and close < midnight and not np.isnan(bsl) and high >= bsl and close < bsh:
+            sigS = True; model = "MMSM"
+        elif sessions["AM"] and not np.isnan(midnight) and low < midnight and close > midnight and ctx["bull_mss"][i]:
+            sigL = True; model = "PO3"
+        elif sessions["AM"] and not np.isnan(midnight) and high > midnight and close < midnight and ctx["bear_mss"][i]:
+            sigS = True; model = "PO3"
+        elif sessions["Judas"] and ctx["bull_sweep_ok"][i] and close > opn and close > df5["high"].iloc[i-1] and strong_up and close > h1["ema200"]:
+            sigL = True; model = "Judas"
+        elif sessions["Judas"] and ctx["bear_sweep_ok"][i] and close < opn and close < df5["low"].iloc[i-1] and strong_dn and close < h1["ema200"]:
+            sigS = True; model = "Judas"
+        elif sessions["AM"] and chainL and not np.isnan(bbh) and low <= bbh and close > bbl:
+            sigL = True; model = "SMR"
+        elif sessions["AM"] and chainS and not np.isnan(bsl) and high >= bsl and close < bsh:
+            sigS = True; model = "SMR"
+        elif sessions["TGIF"] and chainL and ctx["bull_mss"][i]:
+            sigL = True; model = "TGIF"
+        elif sessions["TGIF"] and chainS and ctx["bear_mss"][i]:
+            sigS = True; model = "TGIF"
+        elif sessions["Lunch"] and chainL and not np.isnan(bbh) and close > bbh:
+            sigL = True; model = "Lunch"
+        elif sessions["Lunch"] and chainS and not np.isnan(bsl) and close < bsl:
+            sigS = True; model = "Lunch"
+        if not sigL and not sigS:
+            return None
+        if sigL:
+            sl_level = bbl - atr * 0.3 if not np.isnan(bbl) else ctx["bull_sweep_low"][i] - atr * 0.3
+            entry = close
+            direction = "BUY"
+        else:
+            sl_level = bsh + atr * 0.3 if not np.isnan(bsh) else ctx["bear_sweep_high"][i] + atr * 0.3
+            entry = close
+            direction = "SELL"
+        if np.isnan(entry) or np.isnan(sl_level): return None
+        sl_pts = abs(entry - sl_level) * MULT
+        if sl_pts < MIN_SL_PTS or sl_pts > MAX_SL_PTS: return None
+        sl_dist = abs(entry - sl_level)
+        if direction == "BUY":
+            tp1 = entry + sl_dist * TP1_R; tp2 = entry + sl_dist * TP2_R; tp3 = entry + sl_dist * TP3_R
+        else:
+            tp1 = entry - sl_dist * TP1_R; tp2 = entry - sl_dist * TP2_R; tp3 = entry - sl_dist * TP3_R
+        print(direction + " " + model + " @ " + str(entry))
+        return {"model": model, "direction": direction, "entry": round(entry, 2), "sl": round(sl_level, 2),
+                "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2)}
+    except Exception as e:
+        print("check_signal Exception: " + str(e))
+        traceback.print_exc()
+        return None
+
 
 def main():
-    print(f"[START] {datetime.now(MOSUL)}")
-    mt5 = init_mt5()
-    df = fetch(mt5)
-    b = Bot()
-    b.run(df)
-    mt5.shutdown()
-    print("[DONE]")
+    print("NAS100 Bot (MaxifyFX) - start")
+    try:
+        state = load_state()
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        now_ny = now_utc.astimezone(NY_TZ)
+        if now_ny.weekday() >= 5:
+            print("Weekend - disabled")
+            save_state(state)
+            return
+        today = now_ny.date().isoformat()
+        if state["last_day"] != today:
+            state["trade_count_today"] = 0
+            state["models_done_today"] = []
+            state["last_day"] = today
+        print("Opening session...")
+        account_id = open_session()
+        if not account_id:
+            save_state(state)
+            return
+        if state["active_trade"] is not None:
+            print("Managing active trade...")
+            df5 = fetch_candles(account_id, SYMBOL, "M5", 500, 42)
+            if df5 is None:
+                save_state(state)
+                return
+            manage_trade(state, df5, now_utc)
+            save_state(state)
+            return
+        print("Fetch M5...")
+        df5 = fetch_candles(account_id, SYMBOL, "M5", 500, 42)
+        print("Fetch H1...")
+        df1h = fetch_candles(account_id, SYMBOL, "H1", 500, 500)
+        if df5 is None or df1h is None:
+            save_state(state)
+            return
+        last_candle_time = df5.iloc[-1]["datetime"]
+        minutes_old = (now_utc - last_candle_time).total_seconds() / 60
+        print("Candle age: " + str(round(minutes_old, 1)) + " min")
+        if minutes_old > STALE_DATA_MINUTES:
+            save_state(state)
+            return
+        print("Price: " + str(round(float(df5.iloc[-1]['close']), 2)) + " | Mosul: " + fmt_mosul(now_utc))
+        print("Checking signal...")
+        sig = check_signal(df5, df1h, state, now_utc, now_ny)
+        if sig is None:
+            print("No signal")
+            save_state(state)
+            return
+        model = sig["model"]
+        if model in state["models_done_today"]:
+            save_state(state)
+            return
+        print("Signal found!")
+        state["active_trade"] = {**sig, "tp1_hit": False, "tp2_hit": False, "tp3_hit": False, "entry_time": now_utc.isoformat()}
+        state["trade_count_today"] += 1
+        state["last_entry_time"] = now_utc.isoformat()
+        state["models_done_today"].append(model)
+        send_telegram(
+            "🟢/🔴 New Signal!\n\n"
+            "Model: " + str(sig['model']) + "\n"
+            "Direction: " + str(sig['direction']) + "\n"
+            "Entry: " + str(sig['entry']) + "\n"
+            "Stop: " + str(sig['sl']) + "\n"
+            "TP1: " + str(sig['tp1']) + "\n"
+            "TP2: " + str(sig['tp2']) + "\n"
+            "TP3: " + str(sig['tp3']) + "\n\n"
+            "🕐 " + fmt_mosul(now_utc) + " (Mosul)"
+        )
+        save_state(state)
+    except Exception as e:
+        print("Error: " + str(e))
+        traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()
