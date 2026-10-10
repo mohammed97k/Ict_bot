@@ -31,7 +31,7 @@ jobs:
             exit 1
           }
 
-      - name: First MT5 launch (create config)
+      - name: First MT5 launch
         shell: pwsh
         run: |
           Start-Process "C:\Program Files\MetaTrader 5\terminal64.exe"
