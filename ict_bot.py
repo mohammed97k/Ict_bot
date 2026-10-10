@@ -4,7 +4,7 @@ import pytz
 import pandas as pd
 import numpy as np
 import MetaTrader5 as mt5
-from telegram import Bot
+from telegram import Bot as TGBot
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT  = os.environ["TELEGRAM_CHAT_ID"]
@@ -72,7 +72,7 @@ class Bot:
                      "obBHi": None, "obBLo": None, "obSHi": None, "obSLo": None,
                      "mo": None, "day": None, "dt": 0, "act": {}, "mli": {}}.items():
             self.s.setdefault(k, v)
-        self.tg = Bot.__bases__[0](token=TOKEN) if False else __import__("telegram").Bot(token=TOKEN)
+        self.tg = TGBot(token=TOKEN)
 
     def send(self, m):
         try:
