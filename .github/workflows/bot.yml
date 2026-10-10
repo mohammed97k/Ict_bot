@@ -21,8 +21,21 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" -OutFile mt5.exe
+          Write-Host "Downloaded. Installing..."
           Start-Process .\mt5.exe -ArgumentList "/auto" -Wait
-          Start-Sleep 15
+          Start-Sleep 30
+          $mt5exe = "C:\Program Files\MetaTrader 5\terminal64.exe"
+          if (Test-Path $mt5exe) {
+            Write-Host "MT5 found. Launching..."
+            Start-Process $mt5exe
+            Start-Sleep 20
+            Write-Host "MT5 running."
+          } else {
+            Write-Host "MT5 not found at expected path."
+            Get-ChildItem "C:\Program Files" -Directory | Select-Object Name
+            Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory -ErrorAction SilentlyContinue | Select-Object FullName
+            exit 1
+          }
       - name: Run
         shell: pwsh
         env:
