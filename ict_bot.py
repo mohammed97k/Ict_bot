@@ -3,7 +3,7 @@ from datetime import datetime
 import pytz
 import pandas as pd
 import numpy as np
-from mt5linux import MetaTrader5 as mt5
+from mt5linux import MetaTrader5
 from telegram import Bot as TGBot
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -26,15 +26,16 @@ def save(s):
     with open(STATE, "w") as f: json.dump(s, f, indent=2, default=str)
 
 def init_mt5():
-    ok = mt5.initialize(login=LOGIN, password=PWD, server=SRV, timeout=300000)
-    if not ok:
+    mt5 = MetaTrader5(host="localhost", port=18812)
+    if not mt5.initialize():
         raise Exception(f"MT5 init failed: {mt5.last_error()}")
     info = mt5.account_info()
     if info is None:
         raise Exception("MT5 connected but no account info")
     print(f"[MT5 OK] {info.login} @ {info.server}")
+    return mt5
 
-def fetch():
+def fetch(mt5):
     r = mt5.copy_rates_from_pos(SYM, mt5.TIMEFRAME_M5, 0, 600)
     if r is None or len(r) == 0:
         raise Exception(f"No data for {SYM}")
@@ -223,8 +224,8 @@ class Bot:
 
 def main():
     print(f"[START] {datetime.now(MOSUL)}")
-    init_mt5()
-    df = fetch()
+    mt5 = init_mt5()
+    df = fetch(mt5)
     b = Bot()
     b.run(df)
     mt5.shutdown()
