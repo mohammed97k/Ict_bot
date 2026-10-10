@@ -44,10 +44,8 @@ MSS_EXPIRY = 25
 SWEEP_EXPIRY = 25
 STALE_DATA_MINUTES = 240
 
-
 def fmt_mosul(dt_utc):
     return dt_utc.astimezone(MOSUL_TZ).strftime('%I:%M %p')
-
 
 def send_telegram(message):
     chat_ids = [c for c in [TELEGRAM_CHAT_ID, TELEGRAM_GROUP_CHAT_ID] if c]
@@ -58,7 +56,6 @@ def send_telegram(message):
             print("TG->" + str(chat_id) + ": ok=" + str(r.json().get('ok')))
         except Exception as e:
             print("TG Error: " + str(e))
-
 
 def open_session(max_retries=3):
     url = BASE_URL + "/v1/sessions"
@@ -88,7 +85,6 @@ def open_session(max_retries=3):
     print("All session attempts failed")
     return None
 
-
 def fetch_candles(account_id, symbol, timeframe, limit=500, hours=500, server_offset_hours=SERVER_OFFSET_HOURS):
     url = BASE_URL + "/v1/accounts/" + account_id + "/candles"
     headers = {"Authorization": "Bearer " + TICKERALL_API_KEY}
@@ -116,16 +112,13 @@ def fetch_candles(account_id, symbol, timeframe, limit=500, hours=500, server_of
         traceback.print_exc()
         return None
 
-
 def ta_atr(df, period=14):
     high = df["high"]; low = df["low"]; close = df["close"]
     tr = pd.concat([high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()], axis=1).max(axis=1)
     return tr.ewm(alpha=1.0/period, adjust=False).mean()
 
-
 def ta_ema(series, length):
     return series.ewm(span=length, adjust=False).mean()
-
 
 def ta_pivothigh(highs, left, right):
     n = len(highs); result = np.full(n, np.nan)
@@ -135,7 +128,6 @@ def ta_pivothigh(highs, left, right):
             result[i + right] = highs[i]
     return result
 
-
 def ta_pivotlow(lows, left, right):
     n = len(lows); result = np.full(n, np.nan)
     for i in range(left, n - right):
@@ -144,19 +136,15 @@ def ta_pivotlow(lows, left, right):
             result[i + right] = lows[i]
     return result
 
-
 def ta_lowest(series, length):
     return series.rolling(length).min()
-
 
 def ta_highest(series, length):
     return series.rolling(length).max()
 
-
 def tm(dt, h1, m1, h2, m2):
     t = dt.hour * 60 + dt.minute
     return (h1 * 60 + m1) <= t < (h2 * 60 + m2)
-
 
 def session_flags(dt):
     return {
@@ -166,7 +154,6 @@ def session_flags(dt):
         "PM":     tm(dt, 13, 30, 15, 0),
         "TGIF":   (dt.weekday() == 4) and tm(dt, 13, 30, 15, 0),
     }
-
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -178,12 +165,10 @@ def load_state():
     print("State new")
     return {"active_trade": None, "last_entry_time": None, "trade_count_today": 0, "last_day": None, "models_done_today": [], "last_session_alert": None}
 
-
 def save_state(s):
     with open(STATE_FILE, "w") as f:
         json.dump(s, f, indent=2)
     print("State saved")
-
 
 def manage_trade(state, df5, now_utc):
     t = state["active_trade"]
@@ -238,7 +223,6 @@ def manage_trade(state, df5, now_utc):
                 send_telegram("TP3 hit!\nModel: " + str(t['model']) + "\nDir: " + d + "\nEntry: " + str(e) + "\nTP3: " + str(tp3) + "\nTime: " + fmt_mosul(bt))
                 state["active_trade"] = None
                 return
-
 
 def build_context(df):
     n = len(df)
@@ -310,7 +294,6 @@ def build_context(df):
         "sOBHigh": sOBHigh, "sOBLow": sOBLow, "sOBMT": sOBMT, "sOBActive": sOBActive,
         "midnightOpen": midnightOpen,
     }
-
 
 def check_signal(df5, df1h, state, now_utc, now_ny):
     try:
@@ -395,7 +378,6 @@ def check_signal(df5, df1h, state, now_utc, now_ny):
         traceback.print_exc()
         return None
 
-
 def main():
     print("NAS100 Bot (MaxifyFX) - start")
     try:
@@ -455,7 +437,7 @@ def main():
         state["last_entry_time"] = now_utc.isoformat()
         state["models_done_today"].append(model)
         send_telegram(
-            "🟢/🔴 New Signal!\n\n"
+            "New Signal!\n\n"
             "Model: " + str(sig['model']) + "\n"
             "Direction: " + str(sig['direction']) + "\n"
             "Entry: " + str(sig['entry']) + "\n"
@@ -463,13 +445,12 @@ def main():
             "TP1: " + str(sig['tp1']) + "\n"
             "TP2: " + str(sig['tp2']) + "\n"
             "TP3: " + str(sig['tp3']) + "\n\n"
-            "🕐 " + fmt_mosul(now_utc) + " (Mosul)"
+            "Time: " + fmt_mosul(now_utc) + " (Mosul)"
         )
         save_state(state)
     except Exception as e:
         print("Error: " + str(e))
         traceback.print_exc()
-
 
 if __name__ == "__main__":
     main()
